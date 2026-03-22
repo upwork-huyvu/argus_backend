@@ -10,6 +10,7 @@ import { MissionsModule } from "./missions/missions.module";
 import { DashboardModule } from "./dashboard/dashboard.module";
 import { AlertsModule } from "./alerts/alerts.module";
 import { ArksModule } from "./arks/arks.module";
+import { PublicRtspModule } from "./public-rtsp/public-rtsp.module";
 import path from "node:path";
 
 @Module({
@@ -52,6 +53,7 @@ import path from "node:path";
     DashboardModule,
     AlertsModule,
     ArksModule,
+    PublicRtspModule,
   ],
   controllers: [AppController],
   providers: [AppService],
