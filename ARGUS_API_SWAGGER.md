@@ -4,7 +4,8 @@ Base URL:
 - Local dev: `http://localhost:3001`
 
 Swagger UI:
-- `GET /api-docs`
+- `GET /` (root)
+- OpenAPI JSON: `GET /-json`
 
 ---
 

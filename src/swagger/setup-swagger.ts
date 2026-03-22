@@ -1,7 +1,7 @@
 import type { INestApplication } from "@nestjs/common";
 
 /**
- * Sets up Swagger UI at `/api-docs`.
+ * Sets up Swagger UI at `/` (root).
  *
  * We `require()` swagger deps so the backend can still boot even if
  * `@nestjs/swagger` / `swagger-ui-express` haven't been installed yet.
@@ -27,7 +27,8 @@ export async function setupSwagger(app: INestApplication) {
 
     const document = SwaggerModule.createDocument(app, config);
 
-    SwaggerModule.setup("/api-docs", app, document, {
+    // Empty path → Nest validates to `/` (see validatePath in @nestjs/swagger).
+    SwaggerModule.setup("", app, document, {
       swaggerOptions: { persistAuthorization: true },
       customSiteTitle: "Argus API Docs",
       // `swagger-ui-express` is used internally by SwaggerModule,
