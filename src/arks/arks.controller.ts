@@ -29,6 +29,7 @@ export class ArksController {
           coreTemp: { type: "number" },
           dockStatus: { type: "string", enum: ["locked", "unlocked"] },
           droneCount: { type: "number" },
+          droneModel: { type: "string", nullable: true },
           threatLevel: { type: "string", enum: ["low", "medium", "high"] },
           lastSync: { type: "string" },
           firmware: { type: "string" },
@@ -52,6 +53,7 @@ export class ArksController {
             coreTemp: 38,
             dockStatus: "locked",
             droneCount: 3,
+            droneModel: "Mavic Air 2",
             threatLevel: "low",
             lastSync: "12:42 PM",
             firmware: "v1.0.3",
@@ -65,7 +67,7 @@ export class ArksController {
   })
   @Get()
   async getArks(@Req() req: AuthedRequest) {
-    return this.arks.getArks(req.user!.accessToken);
+    return this.arks.getArks(req.user!.userId, req.user!.accessToken);
   }
 }
 

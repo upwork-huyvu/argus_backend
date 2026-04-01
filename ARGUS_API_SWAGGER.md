@@ -2,6 +2,9 @@
 
 Base URL:
 - Local dev: `http://localhost:3001`
+- Vercel: `https://<your-project>.vercel.app` — UI at `/`, spec at `/-json`
+
+**Vercel note:** `@nestjs/swagger` and `swagger-ui-express` must be in **`dependencies`** (not only `devDependencies`), otherwise production installs skip them and `setupSwagger` disables itself (see server logs: `[swagger] Disabled (missing deps)`).
 
 Swagger UI:
 - `GET /` (root)

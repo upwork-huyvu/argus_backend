@@ -26,6 +26,8 @@ async function bootstrap() {
 
   await setupSwagger(app);
 
-  await app.listen(config.get<number>("PORT") ?? 3000);
+  const port = config.get<number>("PORT") ?? 3000;
+  // Bind all interfaces so phones/emulators on LAN can reach the API (not only 127.0.0.1).
+  await app.listen(port, "0.0.0.0");
 }
 bootstrap();

@@ -11,6 +11,7 @@ type ArkRow = {
   core_temp: number;
   dock_status: "locked" | "unlocked";
   drone_count: number;
+  drone_model: string | null;
   threat_level: "low" | "medium" | "high";
   last_sync: string;
   firmware: string;
@@ -28,14 +29,16 @@ type ArkRow = {
 export class ArksService {
   constructor(private readonly supabase: SupabaseService) {}
 
-  async getArks(accessToken: string) {
+  async getArks(userId: string, accessToken: string) {
     const userClient = this.supabase.getUserClient(accessToken);
 
     const { data } = await userClient
       .from("arks")
       .select(
-        "id,name,location,status,power,network,core_temp,dock_status,drone_count,threat_level,last_sync,firmware,operator,deployment_type,hero_image,perimeter_status,visitor_monitoring,lpr,night_patrol,gate_integration",
+        "id,name,location,status,power,network,core_temp,dock_status,drone_count,drone_model,threat_level,last_sync,firmware,operator,deployment_type,hero_image,perimeter_status,visitor_monitoring,lpr,night_patrol,gate_integration",
       )
+      // Enforce ownership even if Supabase RLS is bypassed in dev.
+      .eq("user_id", userId)
       .order("id", { ascending: true });
 
     const rows = (data ?? []) as ArkRow[];
@@ -50,6 +53,7 @@ export class ArksService {
       coreTemp: r.core_temp,
       dockStatus: r.dock_status,
       droneCount: r.drone_count,
+      droneModel: r.drone_model ?? undefined,
       threatLevel: r.threat_level,
       lastSync: r.last_sync,
       firmware: r.firmware,
