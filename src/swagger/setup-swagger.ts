@@ -11,6 +11,21 @@ function swaggerUiDistDir(): string {
   return path.dirname(pkgJson);
 }
 
+/** Resolve concrete files so Vercel / @vercel/nft traces the whole swagger-ui-dist tree. */
+function traceSwaggerUiDistFiles(distDir: string): void {
+  const files = [
+    "swagger-ui-bundle.js",
+    "swagger-ui-standalone-preset.js",
+    "swagger-ui.css",
+    "swagger-ui-initializer.js",
+    "oauth2-redirect.html",
+  ];
+  for (const f of files) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require.resolve(path.join(distDir, f));
+  }
+}
+
 /**
  * Swagger UI at `/docs`. OpenAPI JSON at `/docs-json`.
  *
@@ -18,6 +33,9 @@ function swaggerUiDistDir(): string {
  */
 export async function setupSwagger(app: INestApplication) {
   try {
+    const distDir = swaggerUiDistDir();
+    traceSwaggerUiDistFiles(distDir);
+
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const swagger = require("@nestjs/swagger") as any;
     // Side effect: ensures package is traced by bundlers
@@ -39,7 +57,7 @@ export async function setupSwagger(app: INestApplication) {
     const document = SwaggerModule.createDocument(app, config);
 
     SwaggerModule.setup("docs", app, document, {
-      customSwaggerUiPath: swaggerUiDistDir(),
+      customSwaggerUiPath: distDir,
       swaggerOptions: { persistAuthorization: true },
       customSiteTitle: "Argus API Docs",
     });
