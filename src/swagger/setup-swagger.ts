@@ -1,18 +1,24 @@
 import type { INestApplication } from "@nestjs/common";
+import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import path from "node:path";
+// Keep express peer in the module graph for Vercel / bundlers (SwaggerModule uses it internally).
+import "swagger-ui-express";
 
 /**
- * Absolute path to `swagger-ui-dist` so static assets resolve in production
- * (Vercel serverless file-tracing often skips nested node_modules paths).
+ * Absolute path to `swagger-ui-dist`, or `undefined` to use @nestjs/swagger default resolver.
  */
-function swaggerUiDistDir(): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const pkgJson = require.resolve("swagger-ui-dist/package.json");
-  return path.dirname(pkgJson);
+function trySwaggerUiDistDir(): string | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const pkgJson = require.resolve("swagger-ui-dist/package.json");
+    return path.dirname(pkgJson);
+  } catch {
+    return undefined;
+  }
 }
 
-/** Resolve concrete files so Vercel / @vercel/nft traces the whole swagger-ui-dist tree. */
-function traceSwaggerUiDistFiles(distDir: string): void {
+/** Best-effort: hint file tracers; must never throw or Swagger routes never register. */
+function traceSwaggerUiDistFilesBestEffort(distDir: string): void {
   const files = [
     "swagger-ui-bundle.js",
     "swagger-ui-standalone-preset.js",
@@ -21,28 +27,25 @@ function traceSwaggerUiDistFiles(distDir: string): void {
     "oauth2-redirect.html",
   ];
   for (const f of files) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    require.resolve(path.join(distDir, f));
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      require.resolve(path.join(distDir, f));
+    } catch {
+      // ignore — file may be absent in trimmed serverless bundles
+    }
   }
 }
 
 /**
  * Swagger UI at `/docs`. OpenAPI JSON at `/docs-json`.
- *
- * Root `/` redirects to `/docs` (see AppController) so browser bookmarks keep working.
+ * Root `/` redirects to `/docs` (AppController).
  */
 export async function setupSwagger(app: INestApplication) {
   try {
-    const distDir = swaggerUiDistDir();
-    traceSwaggerUiDistFiles(distDir);
-
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const swagger = require("@nestjs/swagger") as any;
-    // Side effect: ensures package is traced by bundlers
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    require("swagger-ui-express");
-
-    const { DocumentBuilder, SwaggerModule } = swagger;
+    const distDir = trySwaggerUiDistDir();
+    if (distDir) {
+      traceSwaggerUiDistFilesBestEffort(distDir);
+    }
 
     const config = new DocumentBuilder()
       .setTitle("Argus Backend")
@@ -57,12 +60,12 @@ export async function setupSwagger(app: INestApplication) {
     const document = SwaggerModule.createDocument(app, config);
 
     SwaggerModule.setup("docs", app, document, {
-      customSwaggerUiPath: distDir,
+      ...(distDir ? { customSwaggerUiPath: distDir } : {}),
       swaggerOptions: { persistAuthorization: true },
       customSiteTitle: "Argus API Docs",
     });
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.warn("[swagger] Disabled (missing deps):", (err as Error)?.message ?? err);
+    console.error("[swagger] setup failed (routes not registered):", (err as Error)?.stack ?? err);
   }
 }
