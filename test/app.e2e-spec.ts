@@ -25,9 +25,13 @@ describe('AppController (e2e)', () => {
       .expect('Hello World!');
   });
 
-  it('/ (GET) serves Swagger UI', () => {
+  it('/ (GET) redirects to Swagger UI', () => {
+    return request(app.getHttpServer()).get('/').expect(302).expect('Location', '/docs');
+  });
+
+  it('/docs (GET) serves Swagger UI', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .get('/docs')
       .expect(200)
       .expect('Content-Type', /text\/html/);
   });

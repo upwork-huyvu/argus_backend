@@ -1,17 +1,28 @@
 import type { INestApplication } from "@nestjs/common";
+import path from "node:path";
 
 /**
- * Sets up Swagger UI at `/` (root).
+ * Absolute path to `swagger-ui-dist` so static assets resolve in production
+ * (Vercel serverless file-tracing often skips nested node_modules paths).
+ */
+function swaggerUiDistDir(): string {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const pkgJson = require.resolve("swagger-ui-dist/package.json");
+  return path.dirname(pkgJson);
+}
+
+/**
+ * Swagger UI at `/docs`. OpenAPI JSON at `/docs-json`.
  *
- * We `require()` swagger deps so the backend can still boot even if
- * `@nestjs/swagger` / `swagger-ui-express` haven't been installed yet.
+ * Root `/` redirects to `/docs` (see AppController) so browser bookmarks keep working.
  */
 export async function setupSwagger(app: INestApplication) {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const swagger = require("@nestjs/swagger") as any;
+    // Side effect: ensures package is traced by bundlers
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const swaggerUI = require("swagger-ui-express");
+    require("swagger-ui-express");
 
     const { DocumentBuilder, SwaggerModule } = swagger;
 
@@ -27,19 +38,13 @@ export async function setupSwagger(app: INestApplication) {
 
     const document = SwaggerModule.createDocument(app, config);
 
-    // Empty path → Nest validates to `/` (see validatePath in @nestjs/swagger).
-    SwaggerModule.setup("", app, document, {
+    SwaggerModule.setup("docs", app, document, {
+      customSwaggerUiPath: swaggerUiDistDir(),
       swaggerOptions: { persistAuthorization: true },
       customSiteTitle: "Argus API Docs",
-      // `swagger-ui-express` is used internally by SwaggerModule,
-      // but requiring it keeps the dependency explicit.
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      customCssUrl: swaggerUI ? undefined : undefined,
     });
   } catch (err) {
-    // If deps aren't installed yet, keep server booting.
     // eslint-disable-next-line no-console
     console.warn("[swagger] Disabled (missing deps):", (err as Error)?.message ?? err);
   }
 }
-

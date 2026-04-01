@@ -2,13 +2,13 @@
 
 Base URL:
 - Local dev: `http://localhost:3001`
-- Vercel: `https://<your-project>.vercel.app` — UI at `/`, spec at `/-json`
+- Vercel: `https://<your-project>.vercel.app` — UI at `/docs`, spec at `/docs-json` (root `/` redirects to `/docs`)
 
-**Vercel note:** `@nestjs/swagger` and `swagger-ui-express` must be in **`dependencies`** (not only `devDependencies`), otherwise production installs skip them and `setupSwagger` disables itself (see server logs: `[swagger] Disabled (missing deps)`).
+**Vercel note:** Keep `@nestjs/swagger`, `swagger-ui-express`, and **`swagger-ui-dist`** in **`dependencies`**. The repo includes `vercel.json` → `functions["src/main.ts"].includeFiles` so serverless bundles the Swagger static files (without this, the HTML loads but JS/CSS 404 → blank page).
 
 Swagger UI:
-- `GET /` (root)
-- OpenAPI JSON: `GET /-json`
+- `GET /docs` (root `/` → 302 to `/docs`)
+- OpenAPI JSON: `GET /docs-json`
 
 ---
 
