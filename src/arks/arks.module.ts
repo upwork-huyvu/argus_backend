@@ -7,6 +7,7 @@ import { ArksService } from "./arks.service";
   imports: [SupabaseModule],
   controllers: [ArksController],
   providers: [ArksService],
+  exports: [ArksService],
 })
 export class ArksModule {}
 

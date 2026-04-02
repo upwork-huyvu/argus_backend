@@ -29,6 +29,44 @@ type ArkRow = {
 export class ArksService {
   constructor(private readonly supabase: SupabaseService) {}
 
+  async getArkById(userId: string, accessToken: string, arkId: string) {
+    const userClient = this.supabase.getUserClient(accessToken);
+    const { data } = await userClient
+      .from("arks")
+      .select(
+        "id,name,location,status,power,network,core_temp,dock_status,drone_count,drone_model,threat_level,last_sync,firmware,operator,deployment_type,hero_image,perimeter_status,visitor_monitoring,lpr,night_patrol,gate_integration",
+      )
+      .eq("user_id", userId)
+      .eq("id", arkId)
+      .maybeSingle<ArkRow>();
+
+    if (!data) return null;
+
+    return {
+      id: data.id,
+      name: data.name,
+      location: data.location,
+      status: data.status,
+      power: data.power,
+      network: data.network,
+      coreTemp: data.core_temp,
+      dockStatus: data.dock_status,
+      droneCount: data.drone_count,
+      droneModel: data.drone_model ?? undefined,
+      threatLevel: data.threat_level,
+      lastSync: data.last_sync,
+      firmware: data.firmware,
+      operator: data.operator,
+      deploymentType: data.deployment_type,
+      heroImage: data.hero_image ?? null,
+      perimeterStatus: data.perimeter_status ?? null,
+      visitorMonitoring: data.visitor_monitoring ?? null,
+      lpr: data.lpr ?? null,
+      nightPatrol: data.night_patrol ?? null,
+      gateIntegration: data.gate_integration ?? null,
+    };
+  }
+
   async getArks(userId: string, accessToken: string) {
     const userClient = this.supabase.getUserClient(accessToken);
 
