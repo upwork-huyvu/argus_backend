@@ -1,7 +1,7 @@
 # Argus Backend API (Swagger-style)
 
 Base URL:
-- Local dev: `http://localhost:3001`
+- Local dev: `http://localhost:3333` (set `PORT` in `.env.development`; `3001` often conflicts with Cursor port forwarding → HTTP shows only `Upgrade Required`)
 - Vercel: `https://<your-project>.vercel.app` — UI at `/docs`, spec at `/docs-json` (root `/` redirects to `/docs`)
 
 **Vercel note:** Keep `@nestjs/swagger`, `swagger-ui-express`, and **`swagger-ui-dist`** in **`dependencies`**. Nest on Vercel is zero-config from `src/main.ts` — do **not** set `vercel.json` `functions` on a path like `src/main.ts` (Vercel only matches patterns under `api/` for that field and the build fails). `setup-swagger.ts` uses `require.resolve` on concrete `swagger-ui-dist` files so the bundler traces those assets.
@@ -174,7 +174,7 @@ Error (401):
 
 Example (curl):
 ```bash
-curl -sS -X POST "http://localhost:3001/auth/login" \
+curl -sS -X POST "http://localhost:3333/auth/login" \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin"}'
 ```
@@ -201,7 +201,7 @@ Success (200): same response shape as login.
 
 Example (curl):
 ```bash
-curl -sS -X POST "http://localhost:3001/auth/register" \
+curl -sS -X POST "http://localhost:3333/auth/register" \
   -H "Content-Type: application/json" \
   -d '{"name":"Demo User","username":"client","password":"admin","role":"client_admin"}'
 ```

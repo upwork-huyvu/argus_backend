@@ -25,6 +25,13 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+### Argus API docs (Swagger)
+
+- UI: `http://localhost:<PORT>/docs` (set `PORT` in `.env` / `.env.development`; `.env.development` in this repo defaults to **`3333`** so it does not collide with Cursor’s common **`3001`** forward, which only answers HTTP with `426 Upgrade Required`).
+- Raw spec: `http://localhost:<PORT>/docs-json`.
+- If you still see **`Upgrade Required`**, another tool is still on that `PORT`—pick a free port (e.g. `3050`) or disable the IDE port forward, restart Nest, then open `/docs` again.
+
+
 ## Project setup
 
 ```bash

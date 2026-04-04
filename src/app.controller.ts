@@ -1,6 +1,7 @@
 import { Controller, Get, Redirect } from '@nestjs/common';
 import { AppService } from './app.service';
 
+/** Root + health only. Conversational / mission-smart API: `POST /ai/chat` (see AiController). */
 @Controller()
 export class AppController {
   constructor(private readonly appService: AppService) {}
