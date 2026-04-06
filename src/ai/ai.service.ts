@@ -328,7 +328,7 @@ export class AiService {
       .slice(0, maxCount)
       .map((x, index) => ({
         id: x.mission.id,
-        name: x.mission.name,
+        name: x.mission.name,                                                                 
         order: index + 1,
         reason: reasonLabel,
       }));
