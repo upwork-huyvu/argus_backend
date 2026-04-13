@@ -255,7 +255,7 @@ export class AiService {
 
   private detectIntent(
     message: string,
-    previousIntent?: "text" | "status" | "mission_plan",
+    previousIntent?: "text" | "status" | "mission_plan" | "command",
     droneState?: Record<string, unknown>,
   ): "text" | "status" | "mission_plan" {
     const lower = message.toLowerCase();
@@ -782,6 +782,8 @@ export class AiService {
           return {
             type: "text",
             message: OPENAI_INSUFFICIENT_QUOTA_MESSAGE,
+            action: null,
+            confidence: 1.0,
             data: {},
           };
         }

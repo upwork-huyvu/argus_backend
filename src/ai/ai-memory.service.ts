@@ -5,12 +5,12 @@ import { RedisService } from "../common/redis/redis.service";
 export type AiSessionTurn = {
   role: "user" | "assistant";
   content: string;
-  responseType?: "text" | "status" | "mission_plan";
+  responseType?: "text" | "status" | "mission_plan" | "command";
   at: string;
 };
 
 export type AiSessionMemory = {
-  lastIntent: "text" | "status" | "mission_plan";
+  lastIntent: "text" | "status" | "mission_plan" | "command";
   lastMessage: string;
   lastMissions: Array<{ id: string; name: string; order: number }>;
   turns: AiSessionTurn[];
