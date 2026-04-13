@@ -5,11 +5,10 @@ import { DeploymentsModule } from "../deployments/deployments.module";
 import { AiController } from "./ai.controller";
 import { AiMemoryService } from "./ai-memory.service";
 import { AiService } from "./ai.service";
-import { PromptTemplateService } from "./prompt-template.service";
 
 @Module({
   imports: [DeploymentsModule, ArksModule, RedisModule],
   controllers: [AiController],
-  providers: [AiService, AiMemoryService, PromptTemplateService],
+  providers: [AiService, AiMemoryService],
 })
 export class AiModule {}

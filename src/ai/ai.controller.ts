@@ -33,11 +33,37 @@ export class AiController {
     schema: {
       type: "object",
       properties: {
-        type: { type: "string", enum: ["text", "status", "mission_plan"] },
-        message: { type: "string" },
-        data: { type: "object" },
+        type: {
+          type: 'string',
+          enum: ['text', 'status', 'mission_plan', 'command'],
+        },
+        message: { type: 'string' },
+        action: {
+          nullable: true,
+          type: 'object',
+          description:
+            'Populated when the response maps to a direct drone command',
+          properties: {
+            name: {
+              type: 'string',
+              enum: [
+                'TAKEOFF',
+                'LAND',
+                'EMERGENCY_LAND',
+                'RETURN_HOME',
+                'HOVER',
+                'FOLLOW_ME',
+                'GO_TO_WAYPOINT',
+                'RUN_MISSION',
+              ],
+            },
+            params: { type: 'object' },
+          },
+        },
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+        data: { type: 'object' },
       },
-      required: ["type", "message", "data"],
+      required: ['type', 'message', 'action', 'confidence', 'data'],
     },
   })
   @Post("chat")

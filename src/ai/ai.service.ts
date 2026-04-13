@@ -6,7 +6,7 @@ import { DeploymentsService } from "../deployments/deployments.service";
 import { AiMemoryService } from "./ai-memory.service";
 import type { AiSessionMemory } from "./ai-memory.service";
 import { type AiChatRequestDto } from "./dto/ai-chat-request.dto";
-import { PromptTemplateService } from "./prompt-template.service";
+import { ARGUS_SYSTEM_PROMPT, buildContextBlock } from "./prompt-template.service";
 
 type MissionInput = {
   id: string;
@@ -22,9 +22,33 @@ type MissionPlanItem = {
   order: number;
 };
 
+// Catalog of drone commands AI can detect and return.
+// Mobile app / backend reads `action.name` to trigger SDK calls.
+export const DRONE_ACTIONS = [
+  "TAKEOFF",
+  "LAND",
+  "EMERGENCY_LAND",
+  "RETURN_HOME",
+  "HOVER",
+  "FOLLOW_ME",
+  "GO_TO_WAYPOINT",
+  "RUN_MISSION",
+] as const;
+
+export type DroneActionName = (typeof DRONE_ACTIONS)[number];
+
+export type DroneAction = {
+  name: DroneActionName;
+  params: Record<string, unknown>;
+};
+
 export type AiChatResponse = {
-  type: "text" | "status" | "mission_plan";
+  type: "text" | "status" | "mission_plan" | "command";
   message: string;
+  /** Non-null when the response maps to a direct drone command. */
+  action: DroneAction | null;
+  /** 0.0–1.0 — how confident the AI is in this interpretation. */
+  confidence: number;
   data: {
     status?: Record<string, unknown>;
     missions?: MissionPlanItem[];
@@ -49,7 +73,6 @@ export class AiService {
     private readonly arks: ArksService,
     private readonly config: ConfigService,
     private readonly memory: AiMemoryService,
-    private readonly promptTemplate: PromptTemplateService,
   ) {}
 
   /** gpt-5* / o-series: `max_completion_tokens` (not `max_tokens`) and no custom `temperature` (default 1 only). */
@@ -89,7 +112,7 @@ export class AiService {
     const intent = this.detectIntent(userMessage, previousMemory?.lastIntent, droneState);
 
     if (intent === "status") {
-      const response = this.buildStatusResponse(userMessage, droneState);
+      const response = this.buildStatusResponse(userMessage, droneState, body.deployment_id);
       await this.persistMemory(sessionKey, response, userMessage, previousMemory);
       return response;
     }
@@ -100,8 +123,9 @@ export class AiService {
         if (adjusted) {
           const response = this.safeResponse({
             type: "mission_plan",
-            message:
-              "I updated the previous mission sequence based on your follow-up instruction. Review the revised steps before running.",
+            message: "Mission sequence updated per your follow-up. Review before executing.",
+            action: null,
+            confidence: 0.9,
             data: { missions: adjusted },
           });
           await this.persistMemory(sessionKey, response, userMessage, previousMemory);
@@ -113,7 +137,9 @@ export class AiService {
       if (mapped.length > 0) {
         const response = this.safeResponse({
           type: "mission_plan",
-          message: `I prepared a ${mapped.length}-step mission sequence based on your request. You can review and execute each step individually or run accepted missions together.`,
+          message: `${mapped.length}-step mission sequence ready. Review and execute individually or all at once.`,
+          action: null,
+          confidence: 0.88,
           data: { missions: mapped },
         });
         await this.persistMemory(sessionKey, response, userMessage, previousMemory);
@@ -123,8 +149,9 @@ export class AiService {
       if (this.isFollowUpMissionRequest(userMessage) && previousMemory?.lastMissions?.length) {
         const response = this.safeResponse({
           type: "mission_plan",
-          message:
-            "I reused your previous mission plan from this session context. Review the accepted steps and run when ready.",
+          message: "Previous mission plan reloaded from session.",
+          action: null,
+          confidence: 0.75,
           data: { missions: previousMemory.lastMissions },
         });
         await this.persistMemory(sessionKey, response, userMessage, previousMemory);
@@ -139,8 +166,9 @@ export class AiService {
       if (relaxed.length > 0) {
         const response = this.safeResponse({
           type: "mission_plan",
-          message:
-            "Closest matches from your deployment mission list only—confirm order before running.",
+          message: "Closest catalog matches — confirm order before running.",
+          action: null,
+          confidence: 0.6,
           data: { missions: relaxed },
         });
         await this.persistMemory(sessionKey, response, userMessage, previousMemory);
@@ -152,8 +180,9 @@ export class AiService {
         if (fromCatalogOnly.length > 0) {
           const response = this.safeResponse({
             type: "mission_plan",
-            message:
-              "Suggestions use only missions from your deployment. Order follows best match to your message (by name when match is weak).",
+            message: "Showing all deployment missions ordered by relevance to your request.",
+            action: null,
+            confidence: 0.5,
             data: { missions: fromCatalogOnly },
           });
           await this.persistMemory(sessionKey, response, userMessage, previousMemory);
@@ -166,6 +195,7 @@ export class AiService {
       userMessage,
       availableMissions,
       droneState,
+      deploymentType: body.deployment_id,
       chatHistory: this.toPromptHistory(previousMemory),
     });
     if (llm) {
@@ -251,12 +281,17 @@ export class AiService {
     return "text";
   }
 
-  private buildStatusResponse(message: string, droneState: Record<string, unknown>): AiChatResponse {
+  private buildStatusResponse(
+    message: string,
+    droneState: Record<string, unknown>,
+    deploymentId?: string,
+  ): AiChatResponse {
     if (Object.keys(droneState).length === 0) {
       return {
         type: "text",
-        message:
-          "I do not have live drone telemetry for this request yet. Please select a drone or provide drone_state so I can return an accurate status summary.",
+        message: "No live telemetry available. Select a drone or pass drone_state to get status.",
+        action: null,
+        confidence: 1.0,
         data: {},
       };
     }
@@ -271,8 +306,9 @@ export class AiService {
     const picked = Object.keys(status).length > 0 ? status : droneState;
     return {
       type: "status",
-      message:
-        "I pulled the current drone status from the latest available telemetry state. Here are the most relevant fields for your request.",
+      message: "Current drone telemetry:",
+      action: null,
+      confidence: 1.0,
       data: { status: picked },
     };
   }
@@ -361,7 +397,7 @@ export class AiService {
   ): Promise<AiChatResponse> {
     const guidance = this.heuristicOperationalGuidance(userMessage, droneState);
     if (guidance) {
-      return { type: "text", message: guidance, data: {} };
+      return { type: "text", message: guidance, action: null, confidence: 0.75, data: {} };
     }
 
     if (this.wantsMissionOrOpsPlanning(userMessage)) {
@@ -373,8 +409,9 @@ export class AiService {
       if (loose.length > 0) {
         return {
           type: "mission_plan",
-          message:
-            "Closest fits from your mission list—double-check order on site before flying.",
+          message: "Closest catalog matches — confirm order before flying.",
+          action: null,
+          confidence: 0.5,
           data: { missions: loose },
         };
       }
@@ -383,26 +420,28 @@ export class AiService {
         const catalog = this.catalogOnlyMissionPlan(userMessage, availableMissions, 10);
         return {
           type: "mission_plan",
-          message:
-            "Only missions from your deployment list; ordered by how close they are to what you asked (then name).",
+          message: "All deployment missions ordered by relevance.",
+          action: null,
+          confidence: 0.4,
           data: { missions: catalog },
         };
       }
 
       return {
         type: "text",
-        message:
-          "You're asking about flying or missions but I don't have a mission catalog loaded—set deployment_id or pass available_missions.",
+        message: "No mission catalog loaded. Pass deployment_id or available_missions.",
+        action: null,
+        confidence: 1.0,
         data: {},
       };
     }
 
     const freeform = await this.tryLlmFreeformChat(userMessage, this.toPromptHistory(previousMemory));
     if (freeform !== null) {
-      return { type: "text", message: freeform, data: {} };
+      return { type: "text", message: freeform, action: null, confidence: 0.7, data: {} };
     }
 
-    return { type: "text", message: "", data: {} };
+    return { type: "text", message: "", action: null, confidence: 0, data: {} };
   }
 
   /** Plain chat completion—no JSON envelope. Used when structured chat fails or is skipped. */
@@ -434,7 +473,7 @@ export class AiService {
             {
               role: "system",
               content:
-                "You are a friendly teammate. Reply naturally to the user. Plain text only—no JSON wrappers. Be concise unless they want detail.",
+                "You are ARGUS, a drone operations assistant. Reply in plain text only — no JSON. 1-2 sentences unless asked for more. Be direct and operational.",
             },
             ...historyMsgs,
             { role: "user", content: userMessage },
@@ -595,20 +634,27 @@ export class AiService {
     return "";
   }
 
-  /** Models sometimes return wrong type label or missions at top level — normalize before constraints. */
+  /** Normalize the LLM JSON payload → typed AiChatResponse.
+   *  Handles: wrong type labels, missions at top level, new action/confidence fields.
+   */
   private normalizeStructuredLlmPayload(parsed: unknown): AiChatResponse | null {
     if (!parsed || typeof parsed !== "object") return null;
     const o = parsed as Record<string, unknown>;
+
+    // --- type ---
     const t = o.type;
     const type: AiChatResponse["type"] =
-      t === "text" || t === "status" || t === "mission_plan"
+      t === "text" || t === "status" || t === "mission_plan" || t === "command"
         ? t
-        : typeof t === "string" && /mission/i.test(t)
-          ? "mission_plan"
-          : typeof t === "string" && /status|telemetry/i.test(t)
-            ? "status"
-            : "text";
+        : typeof t === "string" && /command/i.test(t)
+          ? "command"
+          : typeof t === "string" && /mission/i.test(t)
+            ? "mission_plan"
+            : typeof t === "string" && /status|telemetry/i.test(t)
+              ? "status"
+              : "text";
 
+    // --- data ---
     let dataObj: Record<string, unknown> = {};
     if (o.data && typeof o.data === "object" && !Array.isArray(o.data)) {
       dataObj = { ...(o.data as Record<string, unknown>) };
@@ -623,12 +669,35 @@ export class AiService {
     const missionsArr = dataObj.missions;
     const hasMissions = Array.isArray(missionsArr) && missionsArr.length > 0;
     const resolvedType: AiChatResponse["type"] =
-      hasMissions && type !== "status" ? "mission_plan" : type;
+      hasMissions && type !== "status" && type !== "command" ? "mission_plan" : type;
+
+    // --- action: validate name against DRONE_ACTIONS catalog ---
+    let action: DroneAction | null = null;
+    const rawAction = o.action;
+    if (rawAction && typeof rawAction === "object" && !Array.isArray(rawAction)) {
+      const a = rawAction as Record<string, unknown>;
+      const actionName = typeof a.name === "string" ? a.name.toUpperCase() : "";
+      if ((DRONE_ACTIONS as readonly string[]).includes(actionName)) {
+        action = {
+          name: actionName as DroneActionName,
+          params: (a.params && typeof a.params === "object" && !Array.isArray(a.params)
+            ? a.params
+            : {}) as Record<string, unknown>,
+        };
+      }
+    }
+
+    // --- confidence: clamp to [0,1] ---
+    const rawConf = o.confidence;
+    const confidence =
+      typeof rawConf === "number" && isFinite(rawConf) ? Math.min(1, Math.max(0, rawConf)) : 0.8;
 
     const message = this.pickAssistantMessageFromObject(o);
     return {
       type: resolvedType,
       message,
+      action,
+      confidence,
       data: {
         status: dataObj.status as Record<string, unknown> | undefined,
         missions: dataObj.missions as MissionPlanItem[] | undefined,
@@ -636,20 +705,55 @@ export class AiService {
     };
   }
 
+  /**
+   * Builds the OpenAI messages array using proper multi-turn structure:
+   *   [system: persona] → [system: operational context] → [...history turns] → [user: current message]
+   *
+   * Benefits vs. old single-user-message approach:
+   *   - Context is in the right role (system), not in user turn
+   *   - History uses real OpenAI roles → better attention
+   *   - Token efficient: no JSON-serialised chat_history blob in prompt
+   */
+  private buildMessagesArray(input: {
+    userMessage: string;
+    availableMissions: MissionInput[];
+    droneState: Record<string, unknown>;
+    deploymentType?: string;
+    chatHistory: Array<{ role: "user" | "assistant"; content: string }>;
+  }): Array<{ role: string; content: string }> {
+    const contextBlock = buildContextBlock({
+      availableMissions: input.availableMissions,
+      droneState: input.droneState,
+      deploymentType: input.deploymentType,
+    });
+
+    // Keep last 6 turns (3 exchanges) to cap history tokens
+    const recentHistory = input.chatHistory.slice(-6);
+
+    return [
+      { role: "system", content: ARGUS_SYSTEM_PROMPT },
+      { role: "system", content: contextBlock },
+      ...recentHistory.map((t) => ({ role: t.role, content: t.content })),
+      { role: "user", content: input.userMessage },
+    ];
+  }
+
   private async tryLlmStructured(input: {
     userMessage: string;
     availableMissions: MissionInput[];
     droneState: Record<string, unknown>;
+    deploymentType?: string;
     chatHistory: Array<{ role: "user" | "assistant"; content: string; responseType?: string; at: string }>;
   }): Promise<AiChatResponse | null> {
     const apiKey = this.config.get<string>("OPENAI_API_KEY")?.trim();
     if (!apiKey) return null;
 
     const model = this.config.get<string>("OPENAI_MODEL")?.trim() || "gpt-4.1-mini";
-    const prompt = await this.promptTemplate.render({
+    const messages = this.buildMessagesArray({
       userMessage: input.userMessage,
       availableMissions: input.availableMissions,
       droneState: input.droneState,
+      deploymentType: input.deploymentType,
       chatHistory: input.chatHistory,
     });
 
@@ -662,17 +766,12 @@ export class AiService {
         },
         body: JSON.stringify({
           model,
-          ...this.openAiTemperatureParams(model, 0.45),
-          ...this.openAiTokenLimitParams(model, 2048),
+          // Low temperature for deterministic JSON output (was 0.45)
+          ...this.openAiTemperatureParams(model, 0.15),
+          // Our schema is small — 600 tokens is more than enough (was 2048)
+          ...this.openAiTokenLimitParams(model, 600),
           response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "system",
-              content:
-                'Return a single JSON object with keys type, message, data. If type is "text", message must be your full conversational reply (never empty). Use mission_plan only when ordering catalog missions.',
-            },
-            { role: "user", content: prompt },
-          ],
+          messages,
         }),
       });
 
@@ -721,6 +820,8 @@ export class AiService {
     const missionIdSet = new Set(availableMissions.map((m) => m.id));
     const missionNameById = new Map(availableMissions.map((m) => [m.id, m.name]));
     const droneStateKeys = new Set(Object.keys(droneState));
+    const msg = (v: unknown) =>
+      v != null && String(v).trim().length > 0 ? String(v).trim() : "";
 
     if (candidate.type === "mission_plan") {
       const missions = (candidate.data.missions ?? [])
@@ -738,10 +839,9 @@ export class AiService {
 
       return {
         type: "mission_plan",
-        message:
-          candidate.message != null && String(candidate.message).trim().length > 0
-            ? String(candidate.message)
-            : "",
+        message: msg(candidate.message),
+        action: null,
+        confidence: candidate.confidence,
         data: { missions },
       };
     }
@@ -753,28 +853,39 @@ export class AiService {
       );
       return {
         type: "status",
-        message:
-          candidate.message != null && String(candidate.message).trim().length > 0
-            ? String(candidate.message)
-            : "",
+        message: msg(candidate.message),
+        action: null,
+        confidence: candidate.confidence,
         data: { status: Object.keys(status).length > 0 ? status : droneState },
+      };
+    }
+
+    if (candidate.type === "command") {
+      return {
+        type: "command",
+        message: msg(candidate.message),
+        action: candidate.action,
+        confidence: candidate.confidence,
+        data: {},
       };
     }
 
     return {
       type: "text",
-      message: candidate.message != null && String(candidate.message).length > 0 ? String(candidate.message) : "",
+      message: msg(candidate.message),
+      action: candidate.action,
+      confidence: candidate.confidence,
       data: {},
     };
   }
 
   private safeResponse(candidate: AiChatResponse): AiChatResponse {
     if (!candidate || typeof candidate !== "object") {
-      return { type: "text", message: "I could not process that safely.", data: {} };
+      return { type: "text", message: "Request could not be processed.", action: null, confidence: 0, data: {} };
     }
 
-    if (!["text", "status", "mission_plan"].includes(candidate.type)) {
-      return { type: "text", message: "I could not process that safely.", data: {} };
+    if (!["text", "status", "mission_plan", "command"].includes(candidate.type)) {
+      return { type: "text", message: "Request could not be processed.", action: null, confidence: 0, data: {} };
     }
 
     const msg =
@@ -784,6 +895,8 @@ export class AiService {
     return {
       type: candidate.type,
       message: msg,
+      action: candidate.action ?? null,
+      confidence: typeof candidate.confidence === "number" ? candidate.confidence : 0.8,
       data: {
         status: candidate.data?.status,
         missions: candidate.data?.missions,
