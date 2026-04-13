@@ -49,6 +49,7 @@ export class AiChatRequestDto {
   @IsArray()
   available_missions?: MissionInputDto[];
 
+  /** @deprecated Status now uses live DJI SDK on client; kept only for backward compatibility. */
   @IsOptional()
   @IsObject()
   drone_state?: Record<string, unknown>;

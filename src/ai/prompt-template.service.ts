@@ -59,8 +59,8 @@ MISSION RULES
 - If no missions match, return type "text" and explain.
 
 STATUS RULES
-- ONLY use fields from drone_state. NEVER invent telemetry values.
-- If drone_state is empty, say so — do not guess.
+- For status intent, classify what the operator is asking (battery/gps/altitude/speed/connection/all).
+- Do NOT invent telemetry numbers. The mobile app fetches live DJI SDK data after your classification.
 
 CONFIDENCE SCORING
 1.0 = certain (e.g., status query with live telemetry, exact mission match)
@@ -77,7 +77,6 @@ CONFIDENCE SCORING
 
 export type ContextInput = {
   availableMissions: Array<{ id: string; name: string; description?: string }>;
-  droneState: Record<string, unknown>;
   deploymentType?: string;
 };
 
@@ -86,41 +85,7 @@ export function buildContextBlock(ctx: ContextInput): string {
 
   lines.push(`DEPLOYMENT: ${ctx.deploymentType ?? "unspecified"}`);
 
-  if (Object.keys(ctx.droneState).length > 0) {
-    const s = ctx.droneState;
-    const compact: Record<string, unknown> = {};
-    if (s.id) compact.id = s.id;
-    if (s.name) compact.name = s.name;
-    if (s.status !== undefined) compact.status = s.status;
-    // Battery: accept "power" object or flat number
-    const power = s.power;
-    if (power !== undefined) {
-      compact.battery =
-        typeof power === "object" && power !== null
-          ? (power as Record<string, unknown>).percentage ??
-            (power as Record<string, unknown>).soc ??
-            power
-          : power;
-    }
-    // Network / signal
-    const net = s.network;
-    if (net !== undefined) {
-      compact.signal =
-        typeof net === "object" && net !== null
-          ? (net as Record<string, unknown>).strength ??
-            (net as Record<string, unknown>).rssi ??
-            net
-          : net;
-    }
-    // GPS — only send fix quality, not full coordinates (saves tokens)
-    if (s.location !== undefined) compact.gps = "available";
-    if (s.coreTemp !== undefined) compact.coreTemp = s.coreTemp;
-    if (s.threatLevel !== undefined) compact.threatLevel = s.threatLevel;
-    if (s.lastSync !== undefined) compact.lastSync = s.lastSync;
-    lines.push(`DRONE STATE: ${JSON.stringify(compact)}`);
-  } else {
-    lines.push("DRONE STATE: no telemetry provided");
-  }
+  lines.push("DRONE STATE: handled client-side from live DJI SDK telemetry");
 
   if (ctx.availableMissions.length > 0) {
     const mlist = ctx.availableMissions

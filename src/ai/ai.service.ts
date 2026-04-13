@@ -1,6 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { ArksService } from "../arks/arks.service";
 import { type DeploymentType, isDeploymentType } from "../common/deployment-types";
 import { DeploymentsService } from "../deployments/deployments.service";
 import { AiMemoryService } from "./ai-memory.service";
@@ -21,6 +20,15 @@ type MissionPlanItem = {
   reason?: string;
   order: number;
 };
+
+export type StatusQuery =
+  | "BATTERY_LEVEL"
+  | "GPS_STATUS"
+  | "ALTITUDE"
+  | "SPEED"
+  | "DISTANCE_HOME"
+  | "CONNECTION"
+  | "ALL";
 
 // Catalog of drone commands AI can detect and return.
 // Mobile app / backend reads `action.name` to trigger SDK calls.
@@ -49,6 +57,8 @@ export type AiChatResponse = {
   action: DroneAction | null;
   /** 0.0–1.0 — how confident the AI is in this interpretation. */
   confidence: number;
+  query?: StatusQuery;
+  requires_confirmation?: boolean;
   data: {
     status?: Record<string, unknown>;
     missions?: MissionPlanItem[];
@@ -70,7 +80,6 @@ export class AiService {
 
   constructor(
     private readonly deployments: DeploymentsService,
-    private readonly arks: ArksService,
     private readonly config: ConfigService,
     private readonly memory: AiMemoryService,
   ) {}
@@ -104,15 +113,14 @@ export class AiService {
 
   async chat(identity: AuthedIdentity, body: AiChatRequestDto): Promise<AiChatResponse> {
     const availableMissions = await this.resolveAvailableMissions(identity, body);
-    const droneState = await this.resolveDroneState(identity, body);
     const userMessage = body.user_message.trim();
     const sessionKey = this.buildSessionKey(identity.userId, body.deployment_id, body.drone_id);
     const previousMemory = await this.memory.get(sessionKey);
 
-    const intent = this.detectIntent(userMessage, previousMemory?.lastIntent, droneState);
+    const intent = this.detectIntent(userMessage, previousMemory?.lastIntent);
 
     if (intent === "status") {
-      const response = this.buildStatusResponse(userMessage, droneState, body.deployment_id);
+      const response = this.buildStatusResponse(userMessage);
       await this.persistMemory(sessionKey, response, userMessage, previousMemory);
       return response;
     }
@@ -194,7 +202,6 @@ export class AiService {
     const llm = await this.tryLlmStructured({
       userMessage,
       availableMissions,
-      droneState,
       deploymentType: body.deployment_id,
       chatHistory: this.toPromptHistory(previousMemory),
     });
@@ -203,7 +210,6 @@ export class AiService {
         await this.enforceConstraints(
           llm,
           availableMissions,
-          droneState,
           userMessage,
           previousMemory,
         ),
@@ -219,7 +225,7 @@ export class AiService {
     }
 
     const response = this.safeResponse(
-      await this.buildSmartFallback(userMessage, availableMissions, droneState, previousMemory),
+      await this.buildSmartFallback(userMessage, availableMissions, previousMemory),
     );
     await this.persistMemory(sessionKey, response, userMessage, previousMemory);
     return response;
@@ -256,13 +262,11 @@ export class AiService {
   private detectIntent(
     message: string,
     previousIntent?: "text" | "status" | "mission_plan" | "command",
-    droneState?: Record<string, unknown>,
   ): "text" | "status" | "mission_plan" {
     const lower = message.toLowerCase();
-    const hasTelemetry = droneState && Object.keys(droneState).length > 0;
     if (
-      /\b(battery|telemetry|signal|gps|location|power|network)\b/.test(lower) &&
-      (hasTelemetry || /\b(drone|aircraft|uav|ark|remote|controller)\b/.test(lower))
+      /\b(battery|telemetry|signal|gps|location|power|network|altitude|speed|distance|home)\b/.test(lower) &&
+      /\b(drone|aircraft|uav|ark|remote|controller)\b/.test(lower)
     ) {
       return "status";
     }
@@ -281,36 +285,47 @@ export class AiService {
     return "text";
   }
 
-  private buildStatusResponse(
-    message: string,
-    droneState: Record<string, unknown>,
-    deploymentId?: string,
-  ): AiChatResponse {
-    if (Object.keys(droneState).length === 0) {
-      return {
-        type: "text",
-        message: "No live telemetry available. Select a drone or pass drone_state to get status.",
-        action: null,
-        confidence: 1.0,
-        data: {},
-      };
-    }
-
-    const lower = message.toLowerCase();
-    const status: Record<string, unknown> = {};
-    if (/\bbattery|power\b/.test(lower) && "power" in droneState) status.power = droneState.power;
-    if (/\bgps\b/.test(lower) && "gps" in droneState) status.gps = droneState.gps;
-    if (/\blocation\b/.test(lower) && "location" in droneState) status.location = droneState.location;
-    if (/\bsignal|network\b/.test(lower) && "network" in droneState) status.network = droneState.network;
-
-    const picked = Object.keys(status).length > 0 ? status : droneState;
+  private buildStatusResponse(message: string): AiChatResponse {
+    const query = this.detectStatusQuery(message);
     return {
       type: "status",
-      message: "Current drone telemetry:",
+      message: this.buildStatusIntro(query),
       action: null,
       confidence: 1.0,
-      data: { status: picked },
+      query,
+      data: {},
     };
+  }
+
+  private detectStatusQuery(message: string): StatusQuery {
+    const lower = message.toLowerCase();
+    if (/\bbattery|power\b/.test(lower)) return "BATTERY_LEVEL";
+    if (/\bgps|satellite|location|position\b/.test(lower)) return "GPS_STATUS";
+    if (/\baltitude|height\b/.test(lower)) return "ALTITUDE";
+    if (/\bspeed|velocity\b/.test(lower)) return "SPEED";
+    if (/\bdistance.*home|home.*distance|rth distance\b/.test(lower)) return "DISTANCE_HOME";
+    if (/\bconnect|connected|connection|model|online|offline\b/.test(lower)) return "CONNECTION";
+    return "ALL";
+  }
+
+  private buildStatusIntro(query: StatusQuery): string {
+    switch (query) {
+      case "BATTERY_LEVEL":
+        return "Checking battery level.";
+      case "GPS_STATUS":
+        return "Checking GPS status.";
+      case "ALTITUDE":
+        return "Checking altitude.";
+      case "SPEED":
+        return "Checking speed.";
+      case "DISTANCE_HOME":
+        return "Checking distance to home.";
+      case "CONNECTION":
+        return "Checking connection state.";
+      case "ALL":
+      default:
+        return "Checking live drone telemetry.";
+    }
   }
 
   private scoreMissionAgainstQuery(q: string, m: MissionInput): number {
@@ -392,10 +407,9 @@ export class AiService {
   private async buildSmartFallback(
     userMessage: string,
     availableMissions: MissionInput[],
-    droneState: Record<string, unknown>,
     previousMemory?: AiSessionMemory | null,
   ): Promise<AiChatResponse> {
-    const guidance = this.heuristicOperationalGuidance(userMessage, droneState);
+    const guidance = this.heuristicOperationalGuidance(userMessage);
     if (guidance) {
       return { type: "text", message: guidance, action: null, confidence: 0.75, data: {} };
     }
@@ -507,35 +521,23 @@ export class AiService {
 
   private heuristicOperationalGuidance(
     message: string,
-    droneState: Record<string, unknown>,
   ): string | null {
     const lower = message.toLowerCase();
-    const hasTelemetry = Object.keys(droneState).length > 0;
 
     if (
       /\b(connect|connection|pair|pairing|bind|binding|link|linked|offline|not connected|won't connect|wont connect|can't connect|cant connect|no link|mất kết nối|kết nối)\b/.test(
         lower,
       )
     ) {
-      if (!hasTelemetry) {
-        return "Link troubleshooting without live telemetry: power RC then aircraft, confirm USB/data link or Wi‑Fi path per your setup, and check the DJI/GCS screen for bind errors. Reseat cables, try another port/cable, ensure no other controller is bound. Reply with drone_id so I can pull the last known Ark record, or paste the exact error string from the app.";
-      }
-      return "You have some telemetry—confirm status and lastSync look current. If the app still shows disconnected, cold-reboot RC and drone, re-run SDK connection from the device, and verify no duplicate GCS session is holding the link.";
+      return "Check RC/drone power cycle, verify bind state, and retry connection. Ask for status to read live DJI SDK fields.";
     }
 
     if (/\b(battery|charge|charging|low power|power low|dead battery|pin yếu|sạc)\b/.test(lower)) {
-      const power = droneState.power;
-      if (power !== undefined) {
-        return `Power snapshot from current state: ${typeof power === "object" ? JSON.stringify(power) : String(power)}. If SOC/voltage is marginal, land or swap packs; if readings look stale, refresh telemetry from the drone feed.`;
-      }
-      return "No structured power field in the current drone state. Include drone_id or put battery/SOC/voltage under drone_state in your request so I can answer numerically, and say whether you're on the ground or airborne.";
+      return "Ask for battery status and the app will pull live telemetry directly from DJI SDK.";
     }
 
     if (/\b(gps|gnss|satellite|weak signal|lost signal|no gps|mất gps)\b/.test(lower)) {
-      if (hasTelemetry && droneState.location !== undefined) {
-        return `GNSS/location context: ${JSON.stringify(droneState.location)}. Poor fixes often clear with open sky and distance from metal structures; follow OEM calibration if heading or position jumps.`;
-      }
-      return "For GPS/GNSS: open sky, interference-free area, current firmware. Wire location into drone_state or ask for a status with 'gps' once telemetry includes fix quality so I can interpret it.";
+      return "For GPS/GNSS: move to open sky and ask for GPS status to inspect live satellite and fix quality.";
     }
 
     return null;
@@ -576,33 +578,6 @@ export class AiService {
       );
       return [];
     }
-  }
-
-  private async resolveDroneState(
-    identity: AuthedIdentity,
-    body: AiChatRequestDto,
-  ): Promise<Record<string, unknown>> {
-    if (body.drone_state && typeof body.drone_state === "object") {
-      return body.drone_state;
-    }
-
-    if (body.drone_id) {
-      const ark = await this.arks.getArkById(identity.userId, identity.accessToken, body.drone_id);
-      if (!ark) return {};
-      return {
-        id: ark.id,
-        name: ark.name,
-        status: ark.status,
-        power: ark.power,
-        network: ark.network,
-        location: ark.location,
-        coreTemp: ark.coreTemp,
-        threatLevel: ark.threatLevel,
-        lastSync: ark.lastSync,
-      };
-    }
-
-    return {};
   }
 
   private isOpenAiInsufficientQuota(httpStatus: number, errBody: string): boolean {
@@ -693,11 +668,26 @@ export class AiService {
       typeof rawConf === "number" && isFinite(rawConf) ? Math.min(1, Math.max(0, rawConf)) : 0.8;
 
     const message = this.pickAssistantMessageFromObject(o);
+    const rawQuery = typeof o.query === "string" ? o.query.toUpperCase() : "";
+    const query: StatusQuery | undefined =
+      rawQuery === "BATTERY_LEVEL" ||
+      rawQuery === "GPS_STATUS" ||
+      rawQuery === "ALTITUDE" ||
+      rawQuery === "SPEED" ||
+      rawQuery === "DISTANCE_HOME" ||
+      rawQuery === "CONNECTION" ||
+      rawQuery === "ALL"
+        ? (rawQuery as StatusQuery)
+        : undefined;
+    const requiresConfirmation =
+      typeof o.requires_confirmation === "boolean" ? o.requires_confirmation : undefined;
     return {
       type: resolvedType,
       message,
       action,
       confidence,
+      query,
+      requires_confirmation: requiresConfirmation,
       data: {
         status: dataObj.status as Record<string, unknown> | undefined,
         missions: dataObj.missions as MissionPlanItem[] | undefined,
@@ -717,13 +707,11 @@ export class AiService {
   private buildMessagesArray(input: {
     userMessage: string;
     availableMissions: MissionInput[];
-    droneState: Record<string, unknown>;
     deploymentType?: string;
     chatHistory: Array<{ role: "user" | "assistant"; content: string }>;
   }): Array<{ role: string; content: string }> {
     const contextBlock = buildContextBlock({
       availableMissions: input.availableMissions,
-      droneState: input.droneState,
       deploymentType: input.deploymentType,
     });
 
@@ -741,7 +729,6 @@ export class AiService {
   private async tryLlmStructured(input: {
     userMessage: string;
     availableMissions: MissionInput[];
-    droneState: Record<string, unknown>;
     deploymentType?: string;
     chatHistory: Array<{ role: "user" | "assistant"; content: string; responseType?: string; at: string }>;
   }): Promise<AiChatResponse | null> {
@@ -752,7 +739,6 @@ export class AiService {
     const messages = this.buildMessagesArray({
       userMessage: input.userMessage,
       availableMissions: input.availableMissions,
-      droneState: input.droneState,
       deploymentType: input.deploymentType,
       chatHistory: input.chatHistory,
     });
@@ -815,13 +801,11 @@ export class AiService {
   private async enforceConstraints(
     candidate: AiChatResponse,
     availableMissions: MissionInput[],
-    droneState: Record<string, unknown>,
     userMessage: string,
     previousMemory?: AiSessionMemory | null,
   ): Promise<AiChatResponse> {
     const missionIdSet = new Set(availableMissions.map((m) => m.id));
     const missionNameById = new Map(availableMissions.map((m) => [m.id, m.name]));
-    const droneStateKeys = new Set(Object.keys(droneState));
     const msg = (v: unknown) =>
       v != null && String(v).trim().length > 0 ? String(v).trim() : "";
 
@@ -836,7 +820,7 @@ export class AiService {
         }));
 
       if (missions.length === 0) {
-        return this.buildSmartFallback(userMessage, availableMissions, droneState, previousMemory);
+        return this.buildSmartFallback(userMessage, availableMissions, previousMemory);
       }
 
       return {
@@ -849,16 +833,13 @@ export class AiService {
     }
 
     if (candidate.type === "status") {
-      const source = candidate.data.status ?? {};
-      const status = Object.fromEntries(
-        Object.entries(source).filter(([key]) => droneStateKeys.has(key)),
-      );
       return {
         type: "status",
         message: msg(candidate.message),
         action: null,
         confidence: candidate.confidence,
-        data: { status: Object.keys(status).length > 0 ? status : droneState },
+        query: candidate.query ?? "ALL",
+        data: {},
       };
     }
 
@@ -868,6 +849,7 @@ export class AiService {
         message: msg(candidate.message),
         action: candidate.action,
         confidence: candidate.confidence,
+        requires_confirmation: true,
         data: {},
       };
     }
@@ -899,8 +881,13 @@ export class AiService {
       message: msg,
       action: candidate.action ?? null,
       confidence: typeof candidate.confidence === "number" ? candidate.confidence : 0.8,
+      query: candidate.type === "status" ? (candidate.query ?? "ALL") : undefined,
+      requires_confirmation:
+        candidate.type === "command" || candidate.type === "mission_plan"
+          ? (candidate.requires_confirmation ?? true)
+          : undefined,
       data: {
-        status: candidate.data?.status,
+        status: undefined,
         missions: candidate.data?.missions,
       },
     };
