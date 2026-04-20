@@ -20,6 +20,7 @@ type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
+  username: string | null;
   phone: string | null;
   organization: string | null;
   avatar_url: string | null;
@@ -32,6 +33,7 @@ export type AuthUserProfile = {
   id: string;
   email: string;
   fullName: string | null;
+  username: string | null;
   phone: string | null;
   organization: string | null;
   avatarUrl: string | null;
@@ -93,11 +95,24 @@ export class AuthService {
     const email = body.email.trim().toLowerCase();
     const password = body.password;
     const fullName = body.fullName.trim();
-    if (!email || !password || !fullName) {
+    const username = body.username.trim().toLowerCase();
+    if (!email || !password || !fullName || !username) {
       throw new BadRequestException("Validation failed.");
     }
 
     const admin = this.supabase.getAdminClient();
+
+    // Pre-flight username uniqueness check so we can return a clean 409 before
+    // creating the auth.users row. The DB unique index is the real guarantee —
+    // if there's a race we catch the 23505 below and convert it to a Conflict.
+    const { data: existing } = await admin
+      .from("app_users")
+      .select("id")
+      .eq("username", username)
+      .maybeSingle<{ id: string }>();
+    if (existing) {
+      throw new ConflictException("Username already taken.");
+    }
 
     const { data, error } = await admin.auth.signUp({
       email,
@@ -105,6 +120,7 @@ export class AuthService {
       options: {
         data: {
           full_name: fullName,
+          username,
           phone: body.phone ?? null,
           organization: body.organization ?? null,
           // Self-register path — role is always GUEST regardless of request body.
@@ -115,6 +131,12 @@ export class AuthService {
     });
 
     if (error) {
+      // Race condition: unique index on username may fire between the pre-flight
+      // check and the trigger's insert. Supabase surfaces this as "Database
+      // error saving new user" — normalize to 409.
+      if (/username|23505|unique/i.test(error.message)) {
+        throw new ConflictException("Username already taken.");
+      }
       if (/already.*registered|exists/i.test(error.message)) {
         throw new ConflictException("Email already registered.");
       }
@@ -137,6 +159,7 @@ export class AuthService {
         id: data.user.id,
         email,
         full_name: fullName,
+        username,
         phone: body.phone ?? null,
         organization: body.organization ?? null,
         role: "GUEST",
@@ -268,7 +291,7 @@ export class AuthService {
     const { data } = await admin
       .from("app_users")
       .select(
-        "id,email,full_name,phone,organization,avatar_url,role,is_active,last_login_at",
+        "id,email,full_name,username,phone,organization,avatar_url,role,is_active,last_login_at",
       )
       .eq("id", userId)
       .maybeSingle<ProfileRow>();
@@ -287,6 +310,7 @@ export class AuthService {
       id: row.id,
       email: row.email ?? fallbackEmail,
       fullName: row.full_name,
+      username: row.username,
       phone: row.phone,
       organization: row.organization,
       avatarUrl: row.avatar_url,

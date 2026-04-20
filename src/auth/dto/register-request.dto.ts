@@ -4,11 +4,15 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   MinLength,
 } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { USER_ROLES, type UserRole } from "../../common/permissions";
+
+/** Username format: lowercase alphanumerics + underscore, 3–30 chars. */
+export const USERNAME_REGEX = /^[a-z0-9_]{3,30}$/;
 
 export class RegisterRequestDto {
   @ApiProperty({
@@ -35,6 +39,18 @@ export class RegisterRequestDto {
   @IsNotEmpty()
   @MaxLength(120)
   fullName: string;
+
+  @ApiProperty({
+    example: "jane_doe",
+    description:
+      "Unique handle (lowercased on the backend). 3–30 chars, a–z / 0–9 / underscore.",
+  })
+  @IsString()
+  @IsNotEmpty()
+  @Matches(USERNAME_REGEX, {
+    message: "username must be 3–30 chars: lowercase letters, digits, or _",
+  })
+  username: string;
 
   @ApiPropertyOptional({
     example: "+1-407-555-0101",

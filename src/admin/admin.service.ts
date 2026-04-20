@@ -16,6 +16,7 @@ type ProfileRow = {
   id: string;
   email: string | null;
   full_name: string | null;
+  username: string | null;
   phone: string | null;
   organization: string | null;
   avatar_url: string | null;
@@ -30,6 +31,7 @@ export type AdminUserListItem = {
   id: string;
   email: string | null;
   fullName: string | null;
+  username: string | null;
   phone: string | null;
   organization: string | null;
   avatarUrl: string | null;
@@ -45,6 +47,7 @@ type CreateUserArgs = {
   email: string;
   password: string;
   fullName: string;
+  username: string;
   phone?: string | null;
   organization?: string | null;
   role?: UserRole;
@@ -60,7 +63,7 @@ export class AdminService {
     const { data, error } = await admin
       .from("app_users")
       .select(
-        "id,email,full_name,phone,organization,avatar_url,role,is_active,last_login_at,created_at,updated_at",
+        "id,email,full_name,username,phone,organization,avatar_url,role,is_active,last_login_at,created_at,updated_at",
       )
       .order("created_at", { ascending: false })
       .returns<ProfileRow[]>();
@@ -76,7 +79,7 @@ export class AdminService {
       .update({ role })
       .eq("id", userId)
       .select(
-        "id,email,full_name,phone,organization,avatar_url,role,is_active,last_login_at,created_at,updated_at",
+        "id,email,full_name,username,phone,organization,avatar_url,role,is_active,last_login_at,created_at,updated_at",
       )
       .maybeSingle<ProfileRow>();
 
@@ -92,7 +95,7 @@ export class AdminService {
       .update({ is_active: isActive })
       .eq("id", userId)
       .select(
-        "id,email,full_name,phone,organization,avatar_url,role,is_active,last_login_at,created_at,updated_at",
+        "id,email,full_name,username,phone,organization,avatar_url,role,is_active,last_login_at,created_at,updated_at",
       )
       .maybeSingle<ProfileRow>();
 
@@ -113,12 +116,21 @@ export class AdminService {
 
   async createUser(args: CreateUserArgs): Promise<AdminUserListItem> {
     const email = args.email.trim().toLowerCase();
+    const username = args.username.trim().toLowerCase();
     const role = args.role ?? "GUEST";
-    if (!email || !args.password || !args.fullName) {
+    if (!email || !args.password || !args.fullName || !username) {
       throw new BadRequestException("Validation failed.");
     }
 
     const admin = this.supabase.getAdminClient();
+
+    // Pre-flight username uniqueness check.
+    const { data: existing } = await admin
+      .from("app_users")
+      .select("id")
+      .eq("username", username)
+      .maybeSingle<{ id: string }>();
+    if (existing) throw new ConflictException("Username already taken.");
 
     const { data, error } = await admin.auth.admin.createUser({
       email,
@@ -126,6 +138,7 @@ export class AdminService {
       email_confirm: true, // admin-created accounts skip the confirmation email
       user_metadata: {
         full_name: args.fullName.trim(),
+        username,
         phone: args.phone ?? null,
         organization: args.organization ?? null,
         role,
@@ -133,6 +146,9 @@ export class AdminService {
     });
 
     if (error) {
+      if (/username|23505|unique/i.test(error.message)) {
+        throw new ConflictException("Username already taken.");
+      }
       if (/already.*registered|exists/i.test(error.message)) {
         throw new ConflictException("Email already registered.");
       }
@@ -147,7 +163,7 @@ export class AdminService {
       .update({ role, created_by: args.createdBy })
       .eq("id", data.user.id)
       .select(
-        "id,email,full_name,phone,organization,avatar_url,role,is_active,last_login_at,created_at,updated_at",
+        "id,email,full_name,username,phone,organization,avatar_url,role,is_active,last_login_at,created_at,updated_at",
       )
       .maybeSingle<ProfileRow>();
 
@@ -163,6 +179,7 @@ export class AdminService {
       id: row.id,
       email: row.email,
       fullName: row.full_name,
+      username: row.username,
       phone: row.phone,
       organization: row.organization,
       avatarUrl: row.avatar_url,

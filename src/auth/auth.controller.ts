@@ -29,6 +29,7 @@ const AuthUserResponseSchema = {
     id: { type: "string" },
     email: { type: "string" },
     fullName: { type: "string", nullable: true },
+    username: { type: "string", nullable: true },
     phone: { type: "string", nullable: true },
     organization: { type: "string", nullable: true },
     avatarUrl: { type: "string", nullable: true },

@@ -63,6 +63,7 @@ export class AdminController {
       email: body.email,
       password: body.password,
       fullName: body.fullName,
+      username: body.username,
       phone: body.phone,
       organization: body.organization,
       role: body.role,
