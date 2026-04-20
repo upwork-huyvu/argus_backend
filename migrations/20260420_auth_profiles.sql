@@ -1,39 +1,25 @@
 -- =============================================================================
--- Phase A: migrate app_users to Supabase-Auth-linked profile table with the new
--- role enum (GUEST / OPERATOR / ADMIN). Idempotent where possible.
+-- Phase A: migrate app_users to Supabase-Auth-linked profile table with the
+-- GUEST / OPERATOR / ADMIN role model. Idempotent.
 --
 -- Legacy role mapping:
 --   client_admin      -> ADMIN
 --   treycor_operator  -> OPERATOR
 --   viewer            -> GUEST
 --
--- Run inside Supabase SQL editor (or `supabase db push`) against the `arguss`
--- project. See docs/MIGRATIONS.md for step-by-step.
+-- Safe to re-run. Runs entirely inside one transaction — paste into Supabase
+-- SQL editor and click Run.
+--
+-- NOTE on role column type: we use `text` + CHECK constraint instead of a
+-- Postgres enum. Enums can't be mutated safely in the same transaction where
+-- their new values are used, which makes Supabase-editor single-paste runs
+-- painful. Text + CHECK is equivalent at the app layer and trivial to extend.
 -- =============================================================================
-
--- ---------------------------------------------------------------------------
--- 1. Role enum
---    Runs OUTSIDE the main transaction because Postgres forbids using an enum
---    value in the same transaction where it was added — and step 3 below
---    casts rows to 'ADMIN'/'OPERATOR'/'GUEST'. The `add value if not exists`
---    calls handle the case where the enum was created previously with
---    different/partial labels (e.g. lowercase or legacy values).
--- ---------------------------------------------------------------------------
-do $$
-begin
-  if not exists (select 1 from pg_type where typname = 'user_role') then
-    create type public.user_role as enum ('GUEST', 'OPERATOR', 'ADMIN');
-  end if;
-end$$;
-
-alter type public.user_role add value if not exists 'GUEST';
-alter type public.user_role add value if not exists 'OPERATOR';
-alter type public.user_role add value if not exists 'ADMIN';
 
 begin;
 
 -- ---------------------------------------------------------------------------
--- 2. New profile columns
+-- 1. Profile columns (idempotent additions)
 -- ---------------------------------------------------------------------------
 alter table public.app_users
   add column if not exists email         text,
@@ -47,13 +33,25 @@ alter table public.app_users
   add column if not exists created_at    timestamptz not null default now(),
   add column if not exists updated_at    timestamptz not null default now();
 
--- Backfill full_name from the legacy `name` column where null.
-update public.app_users
-   set full_name = coalesce(full_name, name)
- where full_name is null;
+-- Backfill full_name from the legacy `name` column if present.
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'app_users' and column_name = 'name'
+  ) then
+    update public.app_users
+       set full_name = coalesce(full_name, name)
+     where full_name is null;
+  end if;
+end$$;
 
 -- ---------------------------------------------------------------------------
--- 3. Role value migration + column type conversion
+-- 2. Role column: ensure type = text, migrate legacy values, add CHECK.
+--    Handles three possible current states:
+--      a) role column doesn't exist     → create it as text default 'GUEST'
+--      b) role column is an enum type   → drop its default, convert to text
+--      c) role column is already text   → just migrate values
 -- ---------------------------------------------------------------------------
 do $$
 declare
@@ -61,29 +59,59 @@ declare
 begin
   select data_type into col_type
     from information_schema.columns
-   where table_schema = 'public'
-     and table_name   = 'app_users'
-     and column_name  = 'role';
+   where table_schema = 'public' and table_name = 'app_users' and column_name = 'role';
 
-  if col_type in ('text', 'character varying') then
-    update public.app_users
-       set role = case role
-         when 'client_admin'     then 'ADMIN'
-         when 'treycor_operator' then 'OPERATOR'
-         when 'viewer'           then 'GUEST'
-         else coalesce(role, 'GUEST')
-       end;
+  if col_type is null then
+    -- Case (a): no column yet.
+    alter table public.app_users add column role text not null default 'GUEST';
 
+  elsif col_type = 'USER-DEFINED' then
+    -- Case (b): old enum column. Drop default, cast to text, then drop enum type.
     alter table public.app_users alter column role drop default;
-    alter table public.app_users
-      alter column role type public.user_role using role::public.user_role;
-    alter table public.app_users alter column role set default 'GUEST'::public.user_role;
-    alter table public.app_users alter column role set not null;
+    alter table public.app_users alter column role type text using role::text;
+    alter table public.app_users alter column role set default 'GUEST';
+  end if;
+
+  -- Migrate legacy role values in every case.
+  update public.app_users
+     set role = case role
+       when 'client_admin'     then 'ADMIN'
+       when 'treycor_operator' then 'OPERATOR'
+       when 'viewer'           then 'GUEST'
+       when 'admin'            then 'ADMIN'
+       when 'operator'         then 'OPERATOR'
+       when 'guest'            then 'GUEST'
+       else coalesce(nullif(role, ''), 'GUEST')
+     end
+   where role is null
+      or role not in ('GUEST', 'OPERATOR', 'ADMIN');
+
+  -- Ensure the column is non-null with a sensible default.
+  alter table public.app_users alter column role set not null;
+  alter table public.app_users alter column role set default 'GUEST';
+end$$;
+
+-- Drop any previously-created user_role enum type — it's no longer referenced.
+-- If dependent objects exist the drop is skipped via exception handling.
+do $$
+begin
+  if exists (select 1 from pg_type where typname = 'user_role') then
+    begin
+      drop type public.user_role;
+    exception when dependent_objects_still_exist then
+      raise notice 'Keeping legacy user_role enum — still referenced by other objects.';
+    end;
   end if;
 end$$;
 
+-- Install the CHECK constraint (drop+recreate so it always matches canonical set).
+alter table public.app_users drop constraint if exists app_users_role_check;
+alter table public.app_users
+  add constraint app_users_role_check
+  check (role in ('GUEST', 'OPERATOR', 'ADMIN'));
+
 -- ---------------------------------------------------------------------------
--- 4. updated_at auto-refresh trigger
+-- 3. updated_at auto-refresh trigger
 -- ---------------------------------------------------------------------------
 create or replace function public.set_updated_at()
 returns trigger language plpgsql as $$
@@ -99,9 +127,9 @@ create trigger trg_app_users_updated_at
   for each row execute function public.set_updated_at();
 
 -- ---------------------------------------------------------------------------
--- 5. Auto-create profile row when auth.users row is created.
---    Reads full_name/phone/organization/role from raw_user_meta_data so the
---    backend can pass them via supabase.auth.signUp({ options: { data } }).
+-- 4. Auto-create profile row when auth.users row is created.
+--    Reads full_name / phone / organization / role from raw_user_meta_data
+--    so the backend can pass them via supabase.auth.signUp({ options: { data } }).
 -- ---------------------------------------------------------------------------
 create or replace function public.handle_new_auth_user()
 returns trigger
@@ -109,7 +137,16 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  meta_role text;
+  final_role text;
 begin
+  meta_role := new.raw_user_meta_data ->> 'role';
+  final_role := case
+    when meta_role in ('GUEST', 'OPERATOR', 'ADMIN') then meta_role
+    else 'GUEST'
+  end;
+
   insert into public.app_users (
     id, email, full_name, phone, organization, role, is_active
   )
@@ -119,10 +156,7 @@ begin
     coalesce(new.raw_user_meta_data ->> 'full_name', new.email),
     new.raw_user_meta_data ->> 'phone',
     new.raw_user_meta_data ->> 'organization',
-    coalesce(
-      nullif(new.raw_user_meta_data ->> 'role', '')::public.user_role,
-      'GUEST'::public.user_role
-    ),
+    final_role,
     true
   )
   on conflict (id) do update set
@@ -140,7 +174,7 @@ create trigger trg_on_auth_user_created
   for each row execute function public.handle_new_auth_user();
 
 -- ---------------------------------------------------------------------------
--- 6. FK app_users.id -> auth.users.id (add only if no orphan rows)
+-- 5. FK app_users.id -> auth.users.id (add only if no orphan rows)
 -- ---------------------------------------------------------------------------
 do $$
 begin
@@ -161,16 +195,17 @@ begin
 end$$;
 
 -- ---------------------------------------------------------------------------
--- 7. Indexes
+-- 6. Indexes
 -- ---------------------------------------------------------------------------
 create index if not exists idx_app_users_role      on public.app_users(role);
 create index if not exists idx_app_users_email     on public.app_users(email);
 create index if not exists idx_app_users_is_active on public.app_users(is_active);
 
 -- ---------------------------------------------------------------------------
--- 8. Baseline RLS (permissive: service_role bypasses; authenticated users see
---    their own row; ADMINs see all). Policies are intentionally narrow; tighten
---    in later phases as product needs evolve.
+-- 7. Baseline RLS
+--    service_role always bypasses; authenticated users can read their own row;
+--    ADMINs can read any row. Writes go through the backend (service_role),
+--    so non-admin update policy is intentionally narrow.
 -- ---------------------------------------------------------------------------
 alter table public.app_users enable row level security;
 
@@ -181,7 +216,7 @@ create policy "app_users_select_own_or_admin" on public.app_users
     auth.uid() = id
     or exists (
       select 1 from public.app_users p
-       where p.id = auth.uid() and p.role = 'ADMIN'::public.user_role
+       where p.id = auth.uid() and p.role = 'ADMIN'
     )
   );
 

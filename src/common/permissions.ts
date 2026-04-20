@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // Role & permission model.
-// Aligns with the `user_role` Postgres enum and the RN auth context.
+// Mirrors the app_users.role CHECK constraint and the RN auth context.
 // -----------------------------------------------------------------------------
 
 export type UserRole = "GUEST" | "OPERATOR" | "ADMIN";

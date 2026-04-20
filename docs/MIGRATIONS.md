@@ -40,7 +40,11 @@ Initial Supabase-Auth-linked profile migration.
 - Back up the `app_users` table if in production.
 
 **Changes:**
-- Creates the `public.user_role` enum (`GUEST | OPERATOR | ADMIN`).
+- Normalizes `app_users.role` to `text` with a CHECK constraint for
+  `GUEST | OPERATOR | ADMIN`. If the column already existed as the legacy
+  `user_role` enum, it's converted to text and the enum type is dropped.
+  (Reason: Postgres forbids using a newly-added enum value in the same
+  transaction — painful in Supabase's single-paste SQL editor.)
 - Adds profile columns: `email`, `full_name`, `phone`, `organization`,
   `avatar_url`, `is_active`, `last_login_at`, `created_by`, `created_at`,
   `updated_at`.
