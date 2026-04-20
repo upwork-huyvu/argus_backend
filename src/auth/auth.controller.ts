@@ -1,37 +1,62 @@
-import { Body, Controller, Post } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Post,
+  Req,
+  UseGuards,
+} from "@nestjs/common";
+import type { Request } from "express";
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiOkResponse,
+  ApiResponse,
+  ApiTags,
+} from "@nestjs/swagger";
 import { AuthService } from "./auth.service";
 import { LoginRequestDto } from "./dto/login-request.dto";
 import { RegisterRequestDto } from "./dto/register-request.dto";
-import { ApiBody, ApiOkResponse, ApiResponse, ApiTags } from "@nestjs/swagger";
+import { ForgotPasswordDto } from "./dto/forgot-password.dto";
+import { ChangePasswordDto } from "./dto/change-password.dto";
+import { RefreshTokenDto } from "./dto/refresh-token.dto";
+import { JwtAuthGuard } from "../common/auth/jwt-auth.guard";
 
 const AuthUserResponseSchema = {
   type: "object",
   properties: {
-    name: { type: "string" },
-    username: { type: "string" },
-    role: {
-      type: "string",
-      enum: ["treycor_operator", "client_admin", "viewer"],
-    },
+    id: { type: "string" },
+    email: { type: "string" },
+    fullName: { type: "string", nullable: true },
+    phone: { type: "string", nullable: true },
+    organization: { type: "string", nullable: true },
+    avatarUrl: { type: "string", nullable: true },
+    role: { type: "string", enum: ["GUEST", "OPERATOR", "ADMIN"] },
+    isActive: { type: "boolean" },
     permissions: {
       type: "object",
       properties: {
-        fullControl: { type: "boolean" },
-        canCustomize: { type: "boolean" },
-        canEdit: { type: "boolean" },
-        canToggle: { type: "boolean" },
-        canDuplicate: { type: "boolean" },
+        canControlDrone: { type: "boolean" },
+        canManageUsers: { type: "boolean" },
+        canEditMissions: { type: "boolean" },
+        canViewDashboard: { type: "boolean" },
       },
-      required: [
-        "fullControl",
-        "canCustomize",
-        "canEdit",
-        "canToggle",
-        "canDuplicate",
-      ],
+      required: ["canControlDrone", "canManageUsers", "canEditMissions", "canViewDashboard"],
     },
   },
-  required: ["name", "username", "role", "permissions"],
+  required: ["id", "email", "role", "isActive", "permissions"],
+};
+
+const SessionResponseSchema = {
+  type: "object",
+  properties: {
+    accessToken: { type: "string" },
+    refreshToken: { type: "string" },
+    expiresAt: { type: "number", nullable: true },
+    user: AuthUserResponseSchema,
+  },
+  required: ["accessToken", "refreshToken", "user"],
 };
 
 @Controller("auth")
@@ -39,101 +64,95 @@ const AuthUserResponseSchema = {
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
-  @ApiBody({
-    type: LoginRequestDto,
-    examples: {
-      default: {
-        value: { username: "admin", password: "admin" },
-      },
-    },
-  })
-  @ApiOkResponse({
-    schema: {
-      type: "object",
-      properties: {
-        accessToken: { type: "string" },
-        user: AuthUserResponseSchema,
-      },
-      required: ["accessToken", "user"],
-    },
-    examples: {
-      success: {
-        summary: "Successful login",
-        value: {
-          accessToken: "<jwt>",
-          user: {
-            name: "Admin User",
-            username: "admin",
-            role: "treycor_operator",
-            permissions: {
-              fullControl: true,
-              canCustomize: true,
-              canEdit: true,
-              canToggle: true,
-              canDuplicate: true,
-            },
-          },
-        },
-      },
-    },
-  })
-  @ApiResponse({
-    status: 401,
-    schema: { type: "object", properties: { message: { type: "string" } } },
-    description: "Invalid credentials",
-    examples: {
-      invalid: {
-        summary: "Invalid credentials",
-        value: { message: "Invalid credentials." },
-      },
-    },
-  })
+  // ---------------------------------------------------------------------------
+  @ApiBody({ type: LoginRequestDto })
+  @ApiOkResponse({ schema: SessionResponseSchema })
+  @ApiResponse({ status: 401, description: "Invalid credentials." })
+  @HttpCode(200)
   @Post("login")
   async login(@Body() body: LoginRequestDto) {
-    return this.authService.login(body.username, body.password);
+    return this.authService.login(body.email, body.password);
   }
 
-  @ApiBody({
-    type: RegisterRequestDto,
-    examples: {
-      default: {
-        value: { name: "New User", username: "client", password: "admin", role: "client_admin" },
-      },
-    },
-  })
-  @ApiOkResponse({
-    schema: {
-      type: "object",
-      properties: {
-        accessToken: { type: "string" },
-        user: AuthUserResponseSchema,
-      },
-      required: ["accessToken", "user"],
-    },
-    examples: {
-      success: {
-        summary: "Successful registration",
-        value: {
-          accessToken: "<jwt>",
-          user: {
-            name: "New User",
-            username: "client",
-            role: "client_admin",
-            permissions: {
-              fullControl: false,
-              canCustomize: true,
-              canEdit: true,
-              canToggle: true,
-              canDuplicate: true,
-            },
-          },
-        },
-      },
-    },
-  })
+  // ---------------------------------------------------------------------------
+  @ApiBody({ type: RegisterRequestDto })
+  @ApiOkResponse({ schema: SessionResponseSchema })
+  @ApiResponse({ status: 409, description: "Email already registered." })
+  @HttpCode(200)
   @Post("register")
   async register(@Body() body: RegisterRequestDto) {
     return this.authService.register(body);
   }
-}
 
+  // ---------------------------------------------------------------------------
+  @ApiBody({ type: ForgotPasswordDto })
+  @ApiOkResponse({
+    schema: {
+      type: "object",
+      properties: { sent: { type: "boolean", example: true } },
+      required: ["sent"],
+    },
+  })
+  @HttpCode(200)
+  @Post("forgot-password")
+  async forgotPassword(@Body() body: ForgotPasswordDto) {
+    return this.authService.forgotPassword(body.email);
+  }
+
+  // ---------------------------------------------------------------------------
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth("bearerAuth")
+  @ApiBody({ type: ChangePasswordDto })
+  @ApiOkResponse({
+    schema: {
+      type: "object",
+      properties: { ok: { type: "boolean", example: true } },
+      required: ["ok"],
+    },
+  })
+  @ApiResponse({ status: 401, description: "Unauthorized or wrong current password." })
+  @HttpCode(200)
+  @Post("change-password")
+  async changePassword(@Req() req: Request, @Body() body: ChangePasswordDto) {
+    return this.authService.changePassword(
+      req.user!.accessToken,
+      body.currentPassword,
+      body.newPassword,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  @ApiBody({ type: RefreshTokenDto })
+  @ApiOkResponse({ schema: SessionResponseSchema })
+  @ApiResponse({ status: 401, description: "Session expired." })
+  @HttpCode(200)
+  @Post("refresh")
+  async refresh(@Body() body: RefreshTokenDto) {
+    return this.authService.refresh(body.refreshToken);
+  }
+
+  // ---------------------------------------------------------------------------
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth("bearerAuth")
+  @ApiOkResponse({
+    schema: {
+      type: "object",
+      properties: { ok: { type: "boolean", example: true } },
+      required: ["ok"],
+    },
+  })
+  @HttpCode(200)
+  @Post("logout")
+  async logout(@Req() req: Request) {
+    return this.authService.logout(req.user!.accessToken);
+  }
+
+  // ---------------------------------------------------------------------------
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth("bearerAuth")
+  @ApiOkResponse({ schema: AuthUserResponseSchema })
+  @Get("me")
+  async me(@Req() req: Request) {
+    return this.authService.getMe(req.user!.userId);
+  }
+}

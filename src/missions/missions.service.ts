@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { SupabaseService } from "../common/supabase/supabase.service";
-import { ROLE_PERMISSIONS, type UserRole } from "../common/permissions";
+import { ROLE_PERMISSIONS, normalizeRole, type UserRole } from "../common/permissions";
 import { type DeploymentType } from "../common/deployment-types";
 import { DeploymentsService } from "../deployments/deployments.service";
 
@@ -29,7 +29,7 @@ export class MissionsService {
 
   async toggleMission(args: ToggleArgs) {
     const role = this.asRole(args.role);
-    if (!ROLE_PERMISSIONS[role].canToggle) throw new ForbiddenException("Forbidden.");
+    if (!ROLE_PERMISSIONS[role].canEditMissions) throw new ForbiddenException("Forbidden.");
 
     // Hydrate and locate mission.
     const deployment = await this.deployments.getDeploymentById(args.userId, args.deploymentId, args.accessToken);
@@ -56,7 +56,7 @@ export class MissionsService {
 
   async duplicateMission(args: DuplicateArgs) {
     const role = this.asRole(args.role);
-    if (!ROLE_PERMISSIONS[role].canDuplicate) throw new ForbiddenException("Forbidden.");
+    if (!ROLE_PERMISSIONS[role].canEditMissions) throw new ForbiddenException("Forbidden.");
 
     const deployment = await this.deployments.getDeploymentById(args.userId, args.deploymentId, args.accessToken);
     const source = deployment.missions.find((m) => m.id === args.missionId);
@@ -103,8 +103,9 @@ export class MissionsService {
   }
 
   private asRole(role: string): UserRole {
-    if (role === "treycor_operator" || role === "client_admin" || role === "viewer") return role;
-    throw new ForbiddenException("Forbidden.");
+    // Accepts both the new enum values and the legacy ones via normalizeRole;
+    // unknown input falls back to GUEST which fails the permission check above.
+    return normalizeRole(role);
   }
 }
 

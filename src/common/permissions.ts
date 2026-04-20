@@ -1,34 +1,59 @@
-export type UserRole = "treycor_operator" | "client_admin" | "viewer";
+// -----------------------------------------------------------------------------
+// Role & permission model.
+// Aligns with the `user_role` Postgres enum and the RN auth context.
+// -----------------------------------------------------------------------------
+
+export type UserRole = "GUEST" | "OPERATOR" | "ADMIN";
+
+export const USER_ROLES: UserRole[] = ["GUEST", "OPERATOR", "ADMIN"];
 
 export type UserPermissions = {
-  fullControl: boolean;
-  canCustomize: boolean;
-  canEdit: boolean;
-  canToggle: boolean;
-  canDuplicate: boolean;
+  /** OPERATOR + ADMIN — may issue commands to the drone SDK. */
+  canControlDrone: boolean;
+  /** ADMIN — may list users and change roles / active status. */
+  canManageUsers: boolean;
+  /** OPERATOR + ADMIN — may edit mission definitions. */
+  canEditMissions: boolean;
+  /** Everyone — dashboards / telemetry are read-only for GUESTs. */
+  canViewDashboard: boolean;
 };
 
 export const ROLE_PERMISSIONS: Record<UserRole, UserPermissions> = {
-  treycor_operator: {
-    fullControl: true,
-    canCustomize: true,
-    canEdit: true,
-    canToggle: true,
-    canDuplicate: true,
+  GUEST: {
+    canControlDrone: false,
+    canManageUsers: false,
+    canEditMissions: false,
+    canViewDashboard: true,
   },
-  client_admin: {
-    fullControl: false,
-    canCustomize: true,
-    canEdit: true,
-    canToggle: true,
-    canDuplicate: true,
+  OPERATOR: {
+    canControlDrone: true,
+    canManageUsers: false,
+    canEditMissions: true,
+    canViewDashboard: true,
   },
-  viewer: {
-    fullControl: false,
-    canCustomize: false,
-    canEdit: false,
-    canToggle: false,
-    canDuplicate: false,
+  ADMIN: {
+    canControlDrone: true,
+    canManageUsers: true,
+    canEditMissions: true,
+    canViewDashboard: true,
   },
 };
 
+/**
+ * Legacy role mapping — used only when reading rows from DBs that haven't yet
+ * been migrated. New writes always use the canonical enum values above.
+ */
+export const LEGACY_ROLE_MAP: Record<string, UserRole> = {
+  client_admin: "ADMIN",
+  treycor_operator: "OPERATOR",
+  viewer: "GUEST",
+};
+
+export function normalizeRole(input: string | null | undefined): UserRole {
+  if (!input) return "GUEST";
+  const upper = input.toUpperCase();
+  if (upper === "GUEST" || upper === "OPERATOR" || upper === "ADMIN") {
+    return upper as UserRole;
+  }
+  return LEGACY_ROLE_MAP[input] ?? "GUEST";
+}

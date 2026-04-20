@@ -1,39 +1,64 @@
-import { IsIn, IsNotEmpty, IsOptional, IsString, MinLength } from "class-validator";
+import {
+  IsEmail,
+  IsIn,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength,
+  MinLength,
+} from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { USER_ROLES, type UserRole } from "../../common/permissions";
 
 export class RegisterRequestDto {
   @ApiProperty({
-    example: "Admin User",
-    description: "Display name",
+    example: "operator@argus.io",
+    description: "Email address; will receive Supabase verification/reset mails.",
   })
-  @IsString()
-  @IsNotEmpty()
-  name: string;
+  @IsEmail()
+  email: string;
 
   @ApiProperty({
-    example: "new_user",
-    description: "Unique username (lowercase/normalized on backend)",
+    example: "P@ssw0rd1!",
+    description: "Plain-text password (Supabase stores the hash).",
   })
   @IsString()
   @IsNotEmpty()
-  username: string;
-
-  @ApiProperty({
-    example: "P@ssw0rd",
-    description: "Plain-text password (backend will hash it)",
-  })
-  @IsString()
-  @IsNotEmpty()
-  @MinLength(4)
+  @MinLength(8)
   password: string;
 
+  @ApiProperty({
+    example: "Jane Doe",
+    description: "Display name shown in the app.",
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  fullName: string;
+
   @ApiPropertyOptional({
-    example: "viewer",
-    description: "User role (defaults to viewer)",
-    enum: ["treycor_operator", "client_admin", "viewer"],
+    example: "+1-407-555-0101",
   })
   @IsOptional()
-  @IsIn(["treycor_operator", "client_admin", "viewer"])
-  role?: "treycor_operator" | "client_admin" | "viewer";
-}
+  @IsString()
+  @MaxLength(40)
+  phone?: string;
 
+  @ApiPropertyOptional({
+    example: "Argus Security Inc.",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  organization?: string;
+
+  @ApiPropertyOptional({
+    example: "GUEST",
+    description:
+      "Role to assign. Only ADMIN callers may set this; anonymous self-registration always becomes GUEST.",
+    enum: USER_ROLES,
+  })
+  @IsOptional()
+  @IsIn(USER_ROLES)
+  role?: UserRole;
+}

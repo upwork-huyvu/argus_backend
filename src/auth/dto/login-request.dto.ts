@@ -1,21 +1,20 @@
-import { IsNotEmpty, IsString } from "class-validator";
+import { IsEmail, IsNotEmpty, IsString, MinLength } from "class-validator";
 import { ApiProperty } from "@nestjs/swagger";
 
 export class LoginRequestDto {
   @ApiProperty({
-    example: "admin",
-    description: "Username used to authenticate",
+    example: "operator@argus.io",
+    description: "Email address used for Supabase Auth sign-in.",
   })
-  @IsString()
-  @IsNotEmpty()
-  username: string;
+  @IsEmail()
+  email: string;
 
   @ApiProperty({
-    example: "admin",
-    description: "Password used to authenticate",
+    example: "P@ssw0rd1!",
+    description: "Account password.",
   })
   @IsString()
   @IsNotEmpty()
+  @MinLength(8)
   password: string;
 }
-

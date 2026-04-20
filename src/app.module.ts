@@ -12,6 +12,7 @@ import { AlertsModule } from "./alerts/alerts.module";
 import { ArksModule } from "./arks/arks.module";
 import { PublicRtspModule } from "./public-rtsp/public-rtsp.module";
 import { AiModule } from "./ai/ai.module";
+import { AdminModule } from "./admin/admin.module";
 import path from "node:path";
 
 @Module({
@@ -56,6 +57,7 @@ import path from "node:path";
     ArksModule,
     PublicRtspModule,
     AiModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],
