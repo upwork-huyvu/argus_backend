@@ -11,10 +11,13 @@
 -- project. See docs/MIGRATIONS.md for step-by-step.
 -- =============================================================================
 
-begin;
-
 -- ---------------------------------------------------------------------------
 -- 1. Role enum
+--    Runs OUTSIDE the main transaction because Postgres forbids using an enum
+--    value in the same transaction where it was added — and step 3 below
+--    casts rows to 'ADMIN'/'OPERATOR'/'GUEST'. The `add value if not exists`
+--    calls handle the case where the enum was created previously with
+--    different/partial labels (e.g. lowercase or legacy values).
 -- ---------------------------------------------------------------------------
 do $$
 begin
@@ -22,6 +25,12 @@ begin
     create type public.user_role as enum ('GUEST', 'OPERATOR', 'ADMIN');
   end if;
 end$$;
+
+alter type public.user_role add value if not exists 'GUEST';
+alter type public.user_role add value if not exists 'OPERATOR';
+alter type public.user_role add value if not exists 'ADMIN';
+
+begin;
 
 -- ---------------------------------------------------------------------------
 -- 2. New profile columns
