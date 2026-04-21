@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -6,12 +7,16 @@ import {
   Patch,
   Post,
   Req,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
 import type { Request } from "express";
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiConsumes,
   ApiOkResponse,
   ApiResponse,
   ApiTags,
@@ -168,5 +173,43 @@ export class AuthController {
   @Patch("me")
   async updateMe(@Req() req: Request, @Body() body: UpdateProfileDto) {
     return this.authService.updateProfile(req.user!.userId, body);
+  }
+
+  // ---------------------------------------------------------------------------
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth("bearerAuth")
+  @ApiConsumes("multipart/form-data")
+  @ApiBody({
+    schema: {
+      type: "object",
+      properties: {
+        file: { type: "string", format: "binary" },
+      },
+      required: ["file"],
+    },
+  })
+  @ApiOkResponse({
+    schema: {
+      type: "object",
+      properties: {
+        avatarUrl: { type: "string" },
+        user: AuthUserResponseSchema,
+      },
+      required: ["avatarUrl", "user"],
+    },
+  })
+  @HttpCode(200)
+  @Post("me/avatar")
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  )
+  async uploadAvatar(
+    @Req() req: Request,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
+    if (!file) throw new BadRequestException("No file uploaded.");
+    return this.authService.uploadAvatar(req.user!.userId, file);
   }
 }

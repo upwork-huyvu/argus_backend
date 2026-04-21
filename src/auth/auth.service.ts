@@ -305,6 +305,72 @@ export class AuthService {
     return this.normalizeProfile(profile, profile.email ?? "");
   }
 
+  async uploadAvatar(
+    userId: string,
+    file: { buffer: Buffer; mimetype: string; size: number; originalname?: string },
+  ): Promise<{ avatarUrl: string; user: AuthUserProfile }> {
+    if (!file?.buffer?.length) throw new BadRequestException("No file uploaded.");
+    if (!file.mimetype?.startsWith("image/")) {
+      throw new BadRequestException("Only image files are allowed.");
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      throw new BadRequestException("File too large (max 5MB).");
+    }
+
+    const admin = this.supabase.getAdminClient();
+    const bucket = "avatars";
+
+    // Ensure bucket exists. Supabase's getBucket returns a 404 error object
+    // when missing; we swallow that and create it as public.
+    const { data: existingBucket } = await admin.storage.getBucket(bucket);
+    if (!existingBucket) {
+      const { error: createErr } = await admin.storage.createBucket(bucket, {
+        public: true,
+      });
+      if (createErr && !/already exists/i.test(createErr.message)) {
+        throw new InternalServerErrorException(
+          `Failed to initialize avatar bucket: ${createErr.message}`,
+        );
+      }
+    }
+
+    // Path is `{userId}/{timestamp}.{ext}` so every user's uploads live in
+    // their own folder — makes RLS policies trivial if we ever tighten
+    // bucket access from public to authenticated.
+    const ext = (file.mimetype.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "");
+    const path = `${userId}/${Date.now()}.${ext}`;
+
+    const { error: uploadErr } = await admin.storage.from(bucket).upload(path, file.buffer, {
+      contentType: file.mimetype,
+      upsert: true,
+    });
+    if (uploadErr) throw new BadRequestException(uploadErr.message);
+
+    const { data: urlData } = admin.storage.from(bucket).getPublicUrl(path);
+    const avatarUrl = urlData.publicUrl;
+
+    // Persist on the profile row so /auth/me returns it next time.
+    const { data: profile, error: patchErr } = await admin
+      .from("app_users")
+      .update({ avatar_url: avatarUrl })
+      .eq("id", userId)
+      .select(
+        "id,email,full_name,username,phone,organization,avatar_url,role,is_active,last_login_at",
+      )
+      .maybeSingle<ProfileRow>();
+
+    if (patchErr || !profile) {
+      throw new InternalServerErrorException(
+        patchErr?.message ?? "Uploaded avatar but failed to persist URL.",
+      );
+    }
+
+    return {
+      avatarUrl,
+      user: this.normalizeProfile(profile, profile.email ?? ""),
+    };
+  }
+
   async updateProfile(
     userId: string,
     patch: {
