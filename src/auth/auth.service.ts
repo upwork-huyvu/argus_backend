@@ -57,16 +57,28 @@ export class AuthService {
   ) {}
 
   // ---------------------------------------------------------------------------
-  // Login
+  // Login — accepts either email or username as `identifier`.
   // ---------------------------------------------------------------------------
-  async login(email: string, password: string): Promise<AuthSessionResponse> {
-    const e = email.trim().toLowerCase();
+  async login(identifier: string, password: string): Promise<AuthSessionResponse> {
+    const raw = identifier.trim();
     const p = password;
-    if (!e || !p) throw new BadRequestException("Validation failed.");
+    if (!raw || !p) throw new BadRequestException("Validation failed.");
+
+    // Treat anything containing '@' as an email; otherwise look up
+    // app_users.username → email and fall back to that.
+    const email = raw.includes("@")
+      ? raw.toLowerCase()
+      : await this.resolveEmailByUsername(raw.toLowerCase());
+
+    if (!email) {
+      // Hide the distinction between "unknown username" and "wrong password"
+      // so username enumeration doesn't leak usernames that exist.
+      throw new UnauthorizedException("Invalid credentials.");
+    }
 
     const admin = this.supabase.getAdminClient();
     const { data, error } = await admin.auth.signInWithPassword({
-      email: e,
+      email,
       password: p,
     });
 
@@ -86,6 +98,16 @@ export class AuthService {
       .eq("id", data.user.id);
 
     return this.toSessionResponse(data.session, profile, data.user);
+  }
+
+  private async resolveEmailByUsername(username: string): Promise<string | null> {
+    const admin = this.supabase.getAdminClient();
+    const { data } = await admin
+      .from("app_users")
+      .select("email")
+      .eq("username", username)
+      .maybeSingle<{ email: string | null }>();
+    return data?.email ?? null;
   }
 
   // ---------------------------------------------------------------------------
