@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   HttpCode,
+  Patch,
   Post,
   Req,
   UseGuards,
@@ -21,6 +22,7 @@ import { RegisterRequestDto } from "./dto/register-request.dto";
 import { ForgotPasswordDto } from "./dto/forgot-password.dto";
 import { ChangePasswordDto } from "./dto/change-password.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
+import { UpdateProfileDto } from "./dto/update-profile.dto";
 import { JwtAuthGuard } from "../common/auth/jwt-auth.guard";
 
 const AuthUserResponseSchema = {
@@ -155,5 +157,16 @@ export class AuthController {
   @Get("me")
   async me(@Req() req: Request) {
     return this.authService.getMe(req.user!.userId);
+  }
+
+  // ---------------------------------------------------------------------------
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth("bearerAuth")
+  @ApiBody({ type: UpdateProfileDto })
+  @ApiOkResponse({ schema: AuthUserResponseSchema })
+  @HttpCode(200)
+  @Patch("me")
+  async updateMe(@Req() req: Request, @Body() body: UpdateProfileDto) {
+    return this.authService.updateProfile(req.user!.userId, body);
   }
 }

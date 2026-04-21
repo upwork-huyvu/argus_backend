@@ -305,6 +305,48 @@ export class AuthService {
     return this.normalizeProfile(profile, profile.email ?? "");
   }
 
+  async updateProfile(
+    userId: string,
+    patch: {
+      fullName?: string;
+      phone?: string;
+      organization?: string;
+      avatarUrl?: string;
+    },
+  ): Promise<AuthUserProfile> {
+    // Build only the fields the caller actually sent. Empty string → null so a
+    // user can clear phone/organization explicitly.
+    const update: Record<string, string | null> = {};
+    if (patch.fullName !== undefined) {
+      const v = patch.fullName.trim();
+      if (!v) throw new BadRequestException("fullName cannot be empty.");
+      update.full_name = v;
+    }
+    if (patch.phone !== undefined) update.phone = patch.phone.trim() || null;
+    if (patch.organization !== undefined) update.organization = patch.organization.trim() || null;
+    if (patch.avatarUrl !== undefined) update.avatar_url = patch.avatarUrl.trim() || null;
+
+    if (Object.keys(update).length === 0) {
+      // Nothing to change — return the current profile rather than hitting the DB.
+      return this.getMe(userId);
+    }
+
+    const admin = this.supabase.getAdminClient();
+    const { data, error } = await admin
+      .from("app_users")
+      .update(update)
+      .eq("id", userId)
+      .select(
+        "id,email,full_name,username,phone,organization,avatar_url,role,is_active,last_login_at",
+      )
+      .maybeSingle<ProfileRow>();
+
+    if (error) throw new BadRequestException(error.message);
+    if (!data) throw new UnauthorizedException("Profile not found.");
+
+    return this.normalizeProfile(data, data.email ?? "");
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
