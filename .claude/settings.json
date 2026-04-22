@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew assembleDebug)",
+      "Bash(./gradlew :expo-speech-recognition:compileDebugKotlin)",
+      "Bash(tar -xzf pkg.tgz package/src/)",
+      "Read(//private/tmp/**)",
+      "Bash(grep -E \"^dji/common/camera/.*\\\\.class$|^dji/sdk/camera/.*\\\\.class$\")",
+      "Bash(grep -iv \"\\\\$\")",
+      "Bash(grep \"\\\\.class$\")",
+      "Bash(grep -v '\\\\$')",
+      "Bash(jar xf:*)",
+      "Bash(javap -p dji/sdk/camera/Camera.class)",
+      "Bash(javap -p dji/common/camera/StorageState.class)",
+      "Bash(grep -v \"\\\\$\")",
+      "Bash(javap -p -classpath dji-sdk-provided-4.18.jar dji.sdk.media.MediaManager)",
+      "Bash(javap -p -classpath dji-sdk-provided-4.18.jar dji.sdk.media.MediaFile)",
+      "Bash(javap -p -classpath dji-sdk-provided-4.18.jar dji.sdk.media.FetchMediaTaskScheduler)",
+      "Bash(javap -p -classpath dji-sdk-provided-4.18.jar dji.common.camera.StorageState)",
+      "Bash(./gradlew :app:compileDebugJavaWithJavac)"
+    ]
+  }
+}
