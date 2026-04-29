@@ -2,15 +2,29 @@ import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { RedisService } from "../common/redis/redis.service";
 
+/**
+ * Mirrors the response-type union in `ai.service.ts`. Kept as a string-set
+ * here so this file stays free of cross-imports — `ai.service.ts` is what
+ * stamps these values onto memory rows.
+ */
+export type AiResponseTypeLabel =
+  | "text"
+  | "info"
+  | "status"
+  | "mission_plan"
+  | "command"
+  | "command_sequence"
+  | "navigation";
+
 export type AiSessionTurn = {
   role: "user" | "assistant";
   content: string;
-  responseType?: "text" | "status" | "mission_plan" | "command";
+  responseType?: AiResponseTypeLabel;
   at: string;
 };
 
 export type AiSessionMemory = {
-  lastIntent: "text" | "status" | "mission_plan" | "command";
+  lastIntent: AiResponseTypeLabel;
   lastMessage: string;
   lastMissions: Array<{ id: string; name: string; order: number }>;
   turns: AiSessionTurn[];

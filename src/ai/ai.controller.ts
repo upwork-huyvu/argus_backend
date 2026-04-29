@@ -35,14 +35,22 @@ export class AiController {
       properties: {
         type: {
           type: 'string',
-          enum: ['text', 'status', 'mission_plan', 'command'],
+          enum: [
+            'text',
+            'info',
+            'status',
+            'mission_plan',
+            'command',
+            'command_sequence',
+            'navigation',
+          ],
         },
         message: { type: 'string' },
         action: {
           nullable: true,
           type: 'object',
           description:
-            'Populated when the response maps to a direct drone command',
+            'Populated when the response maps to a single direct drone command',
           properties: {
             name: {
               type: 'string',
@@ -55,13 +63,20 @@ export class AiController {
                 'FOLLOW_ME',
                 'GO_TO_WAYPOINT',
                 'RUN_MISSION',
+                'ASCEND',
+                'ORBIT',
               ],
             },
             params: { type: 'object' },
           },
         },
         confidence: { type: 'number', minimum: 0, maximum: 1 },
-        data: { type: 'object' },
+        requires_confirmation: { type: 'boolean' },
+        data: {
+          type: 'object',
+          description:
+            'Type-specific payload: { missions } | { actions } | { route, params } | { fields } | { status }',
+        },
       },
       required: ['type', 'message', 'action', 'confidence', 'data'],
     },

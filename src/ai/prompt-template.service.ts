@@ -1,100 +1,171 @@
-import { Injectable } from "@nestjs/common";
-
 // ---------------------------------------------------------------------------
-// ARGUS SYSTEM PROMPT
-// Vai trò: Định nghĩa chính xác AI là gì, luật trả lời, action catalog,
-//          và JSON schema bắt buộc.
-// Nguyên tắc thiết kế:
-//   - Ngắn gọn (< 450 tokens) để không chiếm quá nhiều context window
-//   - Dùng CAPS cho các mục quan trọng để LLM ưu tiên đọc
-//   - Schema cứng → ít hallucination hơn
+// The canonical system prompt lives in
+//   argus_backend/prompts/ai-chat.runtime.prompt.txt
+// and is read at runtime by `PromptLoaderService.getRuntimePrompt()`. There
+// is NO inline fallback: if the file is missing the loader throws so the
+// deploy issue surfaces immediately as a 500. Keep the .txt file shipped
+// with every deployment artifact (see `PromptLoaderService.candidatePaths`).
 // ---------------------------------------------------------------------------
-export const ARGUS_SYSTEM_PROMPT = `\
-You are ARGUS — the AI command core of an autonomous drone operations platform.
-
-IDENTITY
-You are NOT a general chatbot. You are a tactical drone assistant embedded in a live command system.
-Respond as a concise field operator: direct, precise, actionable.
-Default answer length: 1–2 sentences. Expand ONLY if explicitly asked for more detail.
-Never use filler phrases ("Sure!", "Of course!", "Great question!").
-
-MANDATORY RESPONSE FORMAT
-Return ONLY a single valid JSON object — no markdown, no preamble, no trailing text.
-Schema (all fields required):
-{
-  "type": "text" | "status" | "mission_plan" | "command",
-  "message": "Operator-facing message. Max 2 sentences. Plain text.",
-  "action": { "name": "<ACTION>", "params": {} } | null,
-  "confidence": <0.0 to 1.0>,
-  "data": {}
-}
-
-TYPE SELECTION RULES
-- "command"      → user wants to directly control the drone (take off, land, follow, return...)
-- "mission_plan" → user wants to queue/run one or more named missions from the catalog
-- "status"       → user asks about drone health, battery, GPS, connectivity, telemetry
-- "text"         → everything else (advice, Q&A, clarification)
-
-ACTION CATALOG — use exact names, or set action to null
-TAKEOFF          | Arm motors and lift off to hover altitude
-LAND             | Controlled descent and landing at current position
-EMERGENCY_LAND   | Immediate landing, no gradual descent
-RETURN_HOME      | Navigate to home/launch point and land
-HOVER            | Stop movement, hold current position and altitude
-FOLLOW_ME        | Track and follow the operator's GPS position
-GO_TO_WAYPOINT   | Fly to a specified coordinate or named point
-RUN_MISSION      | Execute a named mission from the deployment catalog
-
-ACTION DETECTION — set action when the message clearly implies a drone command:
-  "take off" / "launch" / "fly up"         → TAKEOFF
-  "land" / "bring it down" / "set down"    → LAND
-  "emergency" / "abort" / "crash land"     → EMERGENCY_LAND
-  "come back" / "return home" / "RTH"      → RETURN_HOME
-  "hold" / "stay" / "hover"               → HOVER
-  "follow me" / "track me"                → FOLLOW_ME
-
-MISSION RULES
-- ONLY reference missions from the available_missions list. NEVER invent an id.
-- Select most relevant missions (max 5), ordered by relevance to the request.
-- If no missions match, return type "text" and explain.
-
-STATUS RULES
-- For status intent, classify what the operator is asking (battery/gps/altitude/speed/connection/all).
-- Do NOT invent telemetry numbers. The mobile app fetches live DJI SDK data after your classification.
-
-CONFIDENCE SCORING
-1.0 = certain (e.g., status query with live telemetry, exact mission match)
-0.7–0.9 = high confidence
-0.5–0.7 = moderate (partial match, ambiguous intent)
-< 0.5 = low — flag uncertainty in message field
-`.trim();
-
+// Dynamic CONTEXT block — built per request from the FE's `client_context`
+// plus server-resolved missions. Pushed to OpenAI as a separate `system`
+// message so it never gets confused with the static instruction prompt.
 // ---------------------------------------------------------------------------
-// CONTEXT BLOCK BUILDER
-// Mục tiêu: Inject context ngắn gọn vào system message riêng biệt.
-// Chỉ gửi các field drone thực sự cần thiết, không dump toàn bộ object.
-// ---------------------------------------------------------------------------
+
+export type ContextNavRoute = {
+  /** Route name as registered in `RootStackParamList` (case-sensitive). */
+  route: string;
+  /** Short user-facing label. */
+  label: string;
+  /** One-line description of what the screen does. */
+  description: string;
+  /** Optional gate ("requires_drone_connected"). */
+  requires?: string;
+};
 
 export type ContextInput = {
   availableMissions: Array<{ id: string; name: string; description?: string }>;
   deploymentType?: string;
+  /** ISO 8601 timestamp from the device's wall clock. */
+  nowIso?: string;
+  /** IANA timezone, e.g. "Asia/Ho_Chi_Minh". */
+  timezone?: string;
+  /** BCP-47 locale, e.g. "vi-VN". */
+  locale?: string;
+  /** Phone GPS at request time. */
+  phoneLocation?: {
+    latitude: number;
+    longitude: number;
+    accuracyM?: number;
+    /** Optional reverse-geocoded label. */
+    label?: string;
+  };
+  /** Live drone state snapshot from the FE's DJI bridge. */
+  droneState?: {
+    connected: boolean;
+    batteryPct?: number;
+    altitudeM?: number;
+    satelliteCount?: number;
+    droneLatitude?: number;
+    droneLongitude?: number;
+    model?: string;
+  };
+  /** Route name the user is currently on. */
+  currentRoute?: string;
+  /** Allowed navigation targets — the model is told to use only these. */
+  navCatalog?: ContextNavRoute[];
 };
 
+function fmtCoord(n: number): string {
+  return Number.isFinite(n) ? n.toFixed(5) : "?";
+}
+
 export function buildContextBlock(ctx: ContextInput): string {
-  const lines: string[] = [];
+  const lines: string[] = ["== CONTEXT =="];
 
+  // --- Time / locale -------------------------------------------------------
+  if (ctx.nowIso) {
+    const tz = ctx.timezone ?? "UTC";
+    const locale = ctx.locale ?? "en-US";
+    lines.push(`NOW: ${ctx.nowIso} (${tz}, locale ${locale})`);
+  } else {
+    lines.push("NOW: unavailable (client did not send now_iso)");
+  }
+
+  // --- Deployment / route --------------------------------------------------
   lines.push(`DEPLOYMENT: ${ctx.deploymentType ?? "unspecified"}`);
+  if (ctx.currentRoute) {
+    lines.push(`CURRENT_ROUTE: ${ctx.currentRoute}`);
+  }
 
-  lines.push("DRONE STATE: handled client-side from live DJI SDK telemetry");
+  // --- Phone location ------------------------------------------------------
+  if (ctx.phoneLocation) {
+    const { latitude, longitude, accuracyM, label } = ctx.phoneLocation;
+    const acc = accuracyM != null ? `, ±${Math.round(accuracyM)}m` : "";
+    const lab = label ? ` (${label})` : "";
+    lines.push(`PHONE_LOCATION: ${fmtCoord(latitude)}, ${fmtCoord(longitude)}${acc}${lab}`);
+  } else {
+    lines.push("PHONE_LOCATION: unavailable");
+  }
 
+  // --- Drone state ---------------------------------------------------------
+  if (ctx.droneState) {
+    const d = ctx.droneState;
+    const parts = [
+      `connected=${d.connected}`,
+      d.model ? `model=${d.model}` : null,
+      d.batteryPct != null ? `battery=${d.batteryPct}%` : null,
+      d.altitudeM != null ? `alt=${d.altitudeM.toFixed(1)}m` : null,
+      d.satelliteCount != null ? `sat=${d.satelliteCount}` : null,
+      d.droneLatitude != null && d.droneLongitude != null
+        ? `pos=${fmtCoord(d.droneLatitude)},${fmtCoord(d.droneLongitude)}`
+        : null,
+    ].filter(Boolean);
+    lines.push(`DRONE_STATE: ${parts.join(" ")}`);
+  } else {
+    lines.push("DRONE_STATE: unavailable");
+  }
+
+  // --- Available missions --------------------------------------------------
   if (ctx.availableMissions.length > 0) {
     const mlist = ctx.availableMissions
-      .map((m) => `  ${m.id} | ${m.name}${m.description ? ` — ${m.description.slice(0, 60)}` : ""}`)
+      .map(
+        (m) =>
+          `  ${m.id} | ${m.name}${
+            m.description ? ` — ${m.description.slice(0, 60)}` : ""
+          }`,
+      )
       .join("\n");
-    lines.push(`AVAILABLE MISSIONS (${ctx.availableMissions.length} total):\n${mlist}`);
+    lines.push(
+      `AVAILABLE_MISSIONS (${ctx.availableMissions.length} total):\n${mlist}`,
+    );
   } else {
-    lines.push("AVAILABLE MISSIONS: none loaded for this deployment");
+    lines.push("AVAILABLE_MISSIONS: none loaded for this deployment");
+  }
+
+  // --- Navigation catalog --------------------------------------------------
+  if (ctx.navCatalog && ctx.navCatalog.length > 0) {
+    const lines2 = ctx.navCatalog
+      .map(
+        (n) =>
+          `  ${n.route} | ${n.label} — ${n.description}${
+            n.requires ? ` [${n.requires}]` : ""
+          }`,
+      )
+      .join("\n");
+    lines.push(`NAVIGATION_CATALOG (use route name verbatim):\n${lines2}`);
+  } else {
+    lines.push(
+      "NAVIGATION_CATALOG: none — do NOT return type=navigation in this turn",
+    );
   }
 
   return lines.join("\n");
 }
+
+// ---------------------------------------------------------------------------
+// Default navigation catalog. Mirrors `RootStackParamList` keys we want the
+// AI to be allowed to navigate to. Bottom-tab routes (Dashboard / LiveView /
+// MissionsV2 / Map / Alerts) plus a curated set of stack screens. Keeping
+// this server-side means we can change the allowlist without an app rebuild.
+// ---------------------------------------------------------------------------
+export const DEFAULT_NAV_CATALOG: ContextNavRoute[] = [
+  { route: "Dashboard",   label: "Dashboard", description: "KPIs, alerts preview, quick actions" },
+  { route: "LiveView",    label: "Live View", description: "Camera grid (Single / Split / Grid)" },
+  { route: "MissionsV2",  label: "Missions",  description: "Mission Center — list, filter, run missions" },
+  { route: "Map",         label: "Map",       description: "Real-time drone map with phone GPS overlay" },
+  { route: "Alerts",      label: "Alerts",    description: "System alerts feed" },
+  { route: "ArgusAI",     label: "Argus AI",  description: "This chat screen" },
+  { route: "Settings",    label: "Settings",  description: "App settings root" },
+  { route: "EditProfile", label: "Edit profile", description: "Profile editor" },
+  { route: "ChatInbox",   label: "Chat",      description: "Chat threads inbox" },
+  { route: "FAA",         label: "FAA",       description: "FAA airspace / NOTAM info" },
+  { route: "HelpCenter",  label: "Help",      description: "FAQ + support" },
+  { route: "Deployment",  label: "Deployment", description: "Pick the active deployment" },
+  { route: "DroneControl",  label: "Pilot mode",      description: "Full-screen pilot with virtual sticks", requires: "requires_drone_connected" },
+  { route: "DroneSettings", label: "Drone settings",  description: "DJI safety / camera tuning",            requires: "requires_drone_connected" },
+];
+
+/** Allowlist used for validating LLM-returned routes server-side. */
+export const NAV_ROUTE_ALLOWLIST: ReadonlySet<string> = new Set(
+  DEFAULT_NAV_CATALOG.map((r) => r.route),
+);

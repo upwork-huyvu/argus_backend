@@ -4,8 +4,14 @@ import { type DeploymentType, isDeploymentType } from "../common/deployment-type
 import { DeploymentsService } from "../deployments/deployments.service";
 import { AiMemoryService } from "./ai-memory.service";
 import type { AiSessionMemory } from "./ai-memory.service";
-import { type AiChatRequestDto } from "./dto/ai-chat-request.dto";
-import { ARGUS_SYSTEM_PROMPT, buildContextBlock } from "./prompt-template.service";
+import { type AiChatRequestDto, type ClientContextDto } from "./dto/ai-chat-request.dto";
+import {
+  buildContextBlock,
+  DEFAULT_NAV_CATALOG,
+  NAV_ROUTE_ALLOWLIST,
+  type ContextInput,
+} from "./prompt-template.service";
+import { PromptLoaderService } from "./prompt-loader.service";
 
 type MissionInput = {
   id: string;
@@ -32,6 +38,9 @@ export type StatusQuery =
 
 // Catalog of drone commands AI can detect and return.
 // Mobile app / backend reads `action.name` to trigger SDK calls.
+//
+// ASCEND / ORBIT (added 2026-04) cover free-form requests like
+// "go up 5m" or "circle once" without needing a predefined mission.
 export const DRONE_ACTIONS = [
   "TAKEOFF",
   "LAND",
@@ -41,6 +50,8 @@ export const DRONE_ACTIONS = [
   "FOLLOW_ME",
   "GO_TO_WAYPOINT",
   "RUN_MISSION",
+  "ASCEND",
+  "ORBIT",
 ] as const;
 
 export type DroneActionName = (typeof DRONE_ACTIONS)[number];
@@ -51,9 +62,21 @@ export type DroneAction = {
 };
 
 export type AiChatResponse = {
-  type: "text" | "status" | "mission_plan" | "command";
+  /**
+   * - "info"             → grounded answer (time / location / drone state) sourced from client_context.
+   * - "navigation"       → instruction for the FE to navigate to a route in NAVIGATION_CATALOG.
+   * - "command_sequence" → ordered list of drone actions executed in one turn.
+   */
+  type:
+    | "text"
+    | "info"
+    | "status"
+    | "mission_plan"
+    | "command"
+    | "command_sequence"
+    | "navigation";
   message: string;
-  /** Non-null when the response maps to a direct drone command. */
+  /** Non-null when the response maps to a single direct drone command. */
   action: DroneAction | null;
   /** 0.0–1.0 — how confident the AI is in this interpretation. */
   confidence: number;
@@ -62,6 +85,13 @@ export type AiChatResponse = {
   data: {
     status?: Record<string, unknown>;
     missions?: MissionPlanItem[];
+    /** type=command_sequence: ordered actions to execute. */
+    actions?: DroneAction[];
+    /** type=navigation: route + optional params (route MUST be allowlisted). */
+    route?: string;
+    params?: Record<string, unknown>;
+    /** type=info: structured key/value pairs the FE may render alongside the message. */
+    fields?: Record<string, string>;
   };
 };
 
@@ -82,6 +112,7 @@ export class AiService {
     private readonly deployments: DeploymentsService,
     private readonly config: ConfigService,
     private readonly memory: AiMemoryService,
+    private readonly prompts: PromptLoaderService,
   ) {}
 
   /** gpt-5* / o-series: `max_completion_tokens` (not `max_tokens`) and no custom `temperature` (default 1 only). */
@@ -116,6 +147,17 @@ export class AiService {
     const userMessage = body.user_message.trim();
     const sessionKey = this.buildSessionKey(identity.userId, body.deployment_id, body.drone_id);
     const previousMemory = await this.memory.get(sessionKey);
+
+    // Short-circuit time / location / "what deployment am I in" — these are
+    // pure CONTEXT lookups. We don't need to spend a model call when the
+    // client already gave us the answer in `client_context`.
+    if (body.client_context && this.isInfoGroundingQuery(userMessage)) {
+      const response = this.buildInfoResponse(userMessage, body.client_context);
+      if (response) {
+        await this.persistMemory(sessionKey, response, userMessage, previousMemory);
+        return response;
+      }
+    }
 
     const intent = this.detectIntent(userMessage, previousMemory?.lastIntent);
 
@@ -204,6 +246,7 @@ export class AiService {
       availableMissions,
       deploymentType: body.deployment_id,
       chatHistory: this.toPromptHistory(previousMemory),
+      clientContext: body.client_context,
     });
     if (llm) {
       let response = this.safeResponse(
@@ -261,7 +304,7 @@ export class AiService {
 
   private detectIntent(
     message: string,
-    previousIntent?: "text" | "status" | "mission_plan" | "command",
+    previousIntent?: AiChatResponse["type"],
   ): "text" | "status" | "mission_plan" {
     const lower = message.toLowerCase();
     if (
@@ -610,7 +653,8 @@ export class AiService {
   }
 
   /** Normalize the LLM JSON payload → typed AiChatResponse.
-   *  Handles: wrong type labels, missions at top level, new action/confidence fields.
+   *  Handles: wrong type labels, missions at top level, new action/confidence fields,
+   *  plus the new types: info / navigation / command_sequence.
    */
   private normalizeStructuredLlmPayload(parsed: unknown): AiChatResponse | null {
     if (!parsed || typeof parsed !== "object") return null;
@@ -618,16 +662,29 @@ export class AiService {
 
     // --- type ---
     const t = o.type;
-    const type: AiChatResponse["type"] =
-      t === "text" || t === "status" || t === "mission_plan" || t === "command"
-        ? t
-        : typeof t === "string" && /command/i.test(t)
-          ? "command"
-          : typeof t === "string" && /mission/i.test(t)
-            ? "mission_plan"
-            : typeof t === "string" && /status|telemetry/i.test(t)
-              ? "status"
-              : "text";
+    const knownType =
+      t === "text" ||
+      t === "info" ||
+      t === "status" ||
+      t === "mission_plan" ||
+      t === "command" ||
+      t === "command_sequence" ||
+      t === "navigation";
+    const type: AiChatResponse["type"] = knownType
+      ? (t as AiChatResponse["type"])
+      : typeof t === "string" && /sequence/i.test(t)
+        ? "command_sequence"
+        : typeof t === "string" && /nav/i.test(t)
+          ? "navigation"
+          : typeof t === "string" && /info|context|grounded/i.test(t)
+            ? "info"
+            : typeof t === "string" && /command/i.test(t)
+              ? "command"
+              : typeof t === "string" && /mission/i.test(t)
+                ? "mission_plan"
+                : typeof t === "string" && /status|telemetry/i.test(t)
+                  ? "status"
+                  : "text";
 
     // --- data ---
     let dataObj: Record<string, unknown> = {};
@@ -637,30 +694,63 @@ export class AiService {
     if (!Array.isArray(dataObj.missions) && Array.isArray(o.missions)) {
       dataObj.missions = o.missions;
     }
+    if (!Array.isArray(dataObj.actions) && Array.isArray(o.actions)) {
+      dataObj.actions = o.actions;
+    }
+    if (typeof dataObj.route !== "string" && typeof o.route === "string") {
+      dataObj.route = o.route;
+    }
+    if (!dataObj.fields && o.fields && typeof o.fields === "object" && !Array.isArray(o.fields)) {
+      dataObj.fields = o.fields;
+    }
     if (!dataObj.status && o.status && typeof o.status === "object" && !Array.isArray(o.status)) {
       dataObj.status = o.status;
     }
 
     const missionsArr = dataObj.missions;
     const hasMissions = Array.isArray(missionsArr) && missionsArr.length > 0;
-    const resolvedType: AiChatResponse["type"] =
-      hasMissions && type !== "status" && type !== "command" ? "mission_plan" : type;
+    const actionsArr = dataObj.actions;
+    const hasActions = Array.isArray(actionsArr) && actionsArr.length > 0;
+    let resolvedType: AiChatResponse["type"] = type;
+    if (hasActions && type !== "command") resolvedType = "command_sequence";
+    else if (
+      hasMissions &&
+      type !== "status" &&
+      type !== "command" &&
+      type !== "command_sequence" &&
+      type !== "navigation"
+    )
+      resolvedType = "mission_plan";
 
     // --- action: validate name against DRONE_ACTIONS catalog ---
-    let action: DroneAction | null = null;
-    const rawAction = o.action;
-    if (rawAction && typeof rawAction === "object" && !Array.isArray(rawAction)) {
-      const a = rawAction as Record<string, unknown>;
+    const parseAction = (raw: unknown): DroneAction | null => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+      const a = raw as Record<string, unknown>;
       const actionName = typeof a.name === "string" ? a.name.toUpperCase() : "";
-      if ((DRONE_ACTIONS as readonly string[]).includes(actionName)) {
-        action = {
-          name: actionName as DroneActionName,
-          params: (a.params && typeof a.params === "object" && !Array.isArray(a.params)
-            ? a.params
-            : {}) as Record<string, unknown>,
-        };
-      }
-    }
+      if (!(DRONE_ACTIONS as readonly string[]).includes(actionName)) return null;
+      return {
+        name: actionName as DroneActionName,
+        params: (a.params && typeof a.params === "object" && !Array.isArray(a.params)
+          ? a.params
+          : {}) as Record<string, unknown>,
+      };
+    };
+
+    const action = parseAction(o.action);
+
+    // --- normalized actions[] (drop unknown action names) ---
+    const sequencedActions: DroneAction[] = Array.isArray(actionsArr)
+      ? actionsArr
+          .map((a) => parseAction(a))
+          .filter((a): a is DroneAction => a !== null)
+      : [];
+
+    // --- route (validated against allowlist later, in enforceConstraints) ---
+    const route = typeof dataObj.route === "string" ? dataObj.route : undefined;
+    const params =
+      dataObj.params && typeof dataObj.params === "object" && !Array.isArray(dataObj.params)
+        ? (dataObj.params as Record<string, unknown>)
+        : undefined;
 
     // --- confidence: clamp to [0,1] ---
     const rawConf = o.confidence;
@@ -691,39 +781,98 @@ export class AiService {
       data: {
         status: dataObj.status as Record<string, unknown> | undefined,
         missions: dataObj.missions as MissionPlanItem[] | undefined,
+        actions: sequencedActions.length > 0 ? sequencedActions : undefined,
+        route,
+        params,
+        fields: dataObj.fields as Record<string, string> | undefined,
       },
     };
   }
 
   /**
-   * Builds the OpenAI messages array using proper multi-turn structure:
-   *   [system: persona] → [system: operational context] → [...history turns] → [user: current message]
+   * Builds the OpenAI messages array. Layered system context so the model
+   * always sees:
    *
-   * Benefits vs. old single-user-message approach:
-   *   - Context is in the right role (system), not in user turn
-   *   - History uses real OpenAI roles → better attention
-   *   - Token efficient: no JSON-serialised chat_history blob in prompt
+   *   [system: runtime instructions / response schema]   ← prompts/ai-chat.runtime.prompt.txt
+   *   [system: app knowledge — screens / nav / flows]    ← prompts/argus.detail.prompt.txt
+   *   [system: drone feature catalog / parameter shapes] ← prompts/drone.features.prompt.txt
+   *   [system: dynamic CONTEXT block built per request]
+   *   [...recent chat history...]
+   *   [user: current message]
+   *
+   * The first three are static across requests (cached on first read by
+   * PromptLoaderService); the fourth is rebuilt every turn from
+   * `client_context` so NOW / PHONE_LOCATION / DRONE_STATE are fresh.
+   *
+   * Token budget note: ~6–7k tokens of system context per call. Acceptable
+   * for gpt-4.1-mini's 128k window; revisit if we need to cut cost.
    */
   private buildMessagesArray(input: {
     userMessage: string;
     availableMissions: MissionInput[];
     deploymentType?: string;
     chatHistory: Array<{ role: "user" | "assistant"; content: string }>;
+    clientContext?: ClientContextDto;
   }): Array<{ role: string; content: string }> {
-    const contextBlock = buildContextBlock({
+    // Required — throws InternalServerErrorException if the file is missing.
+    const runtime = this.prompts.getRuntimePrompt();
+    const appDetail = this.prompts.getAppDetailPrompt();
+    const droneFeatures = this.prompts.getDroneFeaturesPrompt();
+
+    const contextInput: ContextInput = {
       availableMissions: input.availableMissions,
       deploymentType: input.deploymentType,
-    });
+      navCatalog: DEFAULT_NAV_CATALOG,
+      nowIso: input.clientContext?.now_iso,
+      timezone: input.clientContext?.timezone,
+      locale: input.clientContext?.locale,
+      currentRoute: input.clientContext?.current_route,
+      phoneLocation: input.clientContext?.phone_location
+        ? {
+            latitude: input.clientContext.phone_location.latitude,
+            longitude: input.clientContext.phone_location.longitude,
+            accuracyM: input.clientContext.phone_location.accuracy_m,
+            label: input.clientContext.phone_location_label,
+          }
+        : undefined,
+      droneState: input.clientContext?.drone_state
+        ? {
+            connected: !!input.clientContext.drone_state.connected,
+            batteryPct: input.clientContext.drone_state.battery_pct,
+            altitudeM: input.clientContext.drone_state.altitude_m,
+            satelliteCount: input.clientContext.drone_state.satellite_count,
+            droneLatitude: input.clientContext.drone_state.drone_latitude,
+            droneLongitude: input.clientContext.drone_state.drone_longitude,
+            model: input.clientContext.drone_state.model,
+          }
+        : undefined,
+    };
+    const contextBlock = buildContextBlock(contextInput);
 
     // Keep last 6 turns (3 exchanges) to cap history tokens
     const recentHistory = input.chatHistory.slice(-6);
 
-    return [
-      { role: "system", content: ARGUS_SYSTEM_PROMPT },
-      { role: "system", content: contextBlock },
-      ...recentHistory.map((t) => ({ role: t.role, content: t.content })),
-      { role: "user", content: input.userMessage },
+    const messages: Array<{ role: string; content: string }> = [
+      { role: "system", content: runtime },
     ];
+    if (appDetail.trim().length > 0) {
+      messages.push({
+        role: "system",
+        content: `== APP KNOWLEDGE ==\n${appDetail}`,
+      });
+    }
+    if (droneFeatures.trim().length > 0) {
+      messages.push({
+        role: "system",
+        content: `== DRONE FEATURE CATALOG ==\n${droneFeatures}`,
+      });
+    }
+    messages.push({ role: "system", content: contextBlock });
+    for (const t of recentHistory) {
+      messages.push({ role: t.role, content: t.content });
+    }
+    messages.push({ role: "user", content: input.userMessage });
+    return messages;
   }
 
   private async tryLlmStructured(input: {
@@ -731,6 +880,7 @@ export class AiService {
     availableMissions: MissionInput[];
     deploymentType?: string;
     chatHistory: Array<{ role: "user" | "assistant"; content: string; responseType?: string; at: string }>;
+    clientContext?: ClientContextDto;
   }): Promise<AiChatResponse | null> {
     const apiKey = this.config.get<string>("OPENAI_API_KEY")?.trim();
     if (!apiKey) return null;
@@ -741,6 +891,7 @@ export class AiService {
       availableMissions: input.availableMissions,
       deploymentType: input.deploymentType,
       chatHistory: input.chatHistory,
+      clientContext: input.clientContext,
     });
 
     try {
@@ -798,6 +949,136 @@ export class AiService {
     }
   }
 
+  /**
+   * Validate an action's params against the catalog ranges declared in
+   * `prompts/ai-chat.runtime.prompt.txt`. Returns either a normalized
+   * DroneAction (numeric coercion + defaults applied) or a string reason
+   * the action was rejected. The caller decides how to surface the reason
+   * (drop it from the sequence, downgrade to text, etc).
+   */
+  private validateActionParams(action: DroneAction): DroneAction | string {
+    const p: Record<string, unknown> =
+      action.params && typeof action.params === "object" && !Array.isArray(action.params)
+        ? { ...action.params }
+        : {};
+
+    const num = (v: unknown): number | null => {
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+      if (typeof v === "string" && v.trim() !== "") {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      }
+      return null;
+    };
+    const inRange = (n: number, lo: number, hi: number) => n >= lo && n <= hi;
+
+    switch (action.name) {
+      case "TAKEOFF":
+      case "LAND":
+      case "EMERGENCY_LAND":
+      case "RETURN_HOME":
+      case "HOVER":
+      case "FOLLOW_ME":
+        return { name: action.name, params: {} };
+
+      case "GO_TO_WAYPOINT": {
+        const lat = num(p.latitude);
+        const lon = num(p.longitude);
+        if (lat == null || !inRange(lat, -90, 90)) {
+          return `GO_TO_WAYPOINT requires a numeric "latitude" in [-90, 90].`;
+        }
+        if (lon == null || !inRange(lon, -180, 180)) {
+          return `GO_TO_WAYPOINT requires a numeric "longitude" in [-180, 180].`;
+        }
+        const out: Record<string, unknown> = { latitude: lat, longitude: lon };
+        const alt = num(p.altitude_m);
+        if (alt != null) {
+          if (!inRange(alt, 0, 500)) {
+            return `GO_TO_WAYPOINT "altitude_m" must be in [0, 500].`;
+          }
+          out.altitude_m = alt;
+        }
+        return { name: "GO_TO_WAYPOINT", params: out };
+      }
+
+      case "ASCEND": {
+        const delta = num(p.delta_m);
+        if (delta == null || delta === 0) {
+          return `ASCEND requires non-zero numeric "delta_m" in [-50, 50].`;
+        }
+        if (!inRange(delta, -50, 50)) {
+          return `ASCEND "delta_m" out of range [-50, 50] (got ${delta}).`;
+        }
+        const out: Record<string, unknown> = { delta_m: delta };
+        const speed = num(p.max_speed_ms);
+        if (speed != null) {
+          if (!inRange(speed, 0.2, 4)) {
+            return `ASCEND "max_speed_ms" must be in [0.2, 4].`;
+          }
+          out.max_speed_ms = speed;
+        }
+        return { name: "ASCEND", params: out };
+      }
+
+      case "ORBIT": {
+        const out: Record<string, unknown> = {};
+        const rev = num(p.revolutions);
+        if (rev != null) {
+          if (!inRange(rev, 0.25, 10)) {
+            return `ORBIT "revolutions" must be in [0.25, 10].`;
+          }
+          out.revolutions = rev;
+        }
+        const radius = num(p.radius_m);
+        if (radius != null) {
+          if (!inRange(radius, 3, 200)) {
+            return `ORBIT "radius_m" must be in [3, 200].`;
+          }
+          out.radius_m = radius;
+        }
+        const angVel = num(p.angular_velocity_deg_s);
+        if (angVel != null) {
+          if (!inRange(angVel, 3, 60)) {
+            return `ORBIT "angular_velocity_deg_s" must be in [3, 60].`;
+          }
+          out.angular_velocity_deg_s = angVel;
+        }
+        if (typeof p.clockwise === "boolean") out.clockwise = p.clockwise;
+        const altitude = num(p.altitude_m);
+        if (altitude != null) {
+          if (!inRange(altitude, 0, 500)) {
+            return `ORBIT "altitude_m" must be in [0, 500].`;
+          }
+          out.altitude_m = altitude;
+        }
+        const lat = num(p.latitude);
+        const lon = num(p.longitude);
+        if ((lat != null) !== (lon != null)) {
+          return `ORBIT requires either both "latitude" and "longitude" or neither.`;
+        }
+        if (lat != null && lon != null) {
+          if (!inRange(lat, -90, 90)) return `ORBIT "latitude" out of range.`;
+          if (!inRange(lon, -180, 180)) return `ORBIT "longitude" out of range.`;
+          out.latitude = lat;
+          out.longitude = lon;
+        }
+        return { name: "ORBIT", params: out };
+      }
+
+      case "RUN_MISSION": {
+        const mid = typeof p.mission_id === "string" ? p.mission_id.trim() : "";
+        if (!mid) return `RUN_MISSION requires a non-empty string "mission_id".`;
+        return { name: "RUN_MISSION", params: { mission_id: mid } };
+      }
+
+      default:
+        // DRONE_ACTIONS guard already ensured `action.name` is in the catalog;
+        // unknown names land here only if the catalog grew without an
+        // updated validator. Fail closed.
+        return `Unknown action "${action.name}" — no validator wired.`;
+    }
+  }
+
   private async enforceConstraints(
     candidate: AiChatResponse,
     availableMissions: MissionInput[],
@@ -844,13 +1125,107 @@ export class AiService {
     }
 
     if (candidate.type === "command") {
+      // Reject commands whose action couldn't be validated against the catalog.
+      if (!candidate.action) {
+        return {
+          type: "text",
+          message: msg(candidate.message) || "I couldn't map that to a valid drone command.",
+          action: null,
+          confidence: candidate.confidence,
+          data: {},
+        };
+      }
+      const validated = this.validateActionParams(candidate.action);
+      if (typeof validated === "string") {
+        // Param outside the documented range (e.g. "ascend 80m" → > 50m cap)
+        // → downgrade to text so the user knows why.
+        return {
+          type: "text",
+          message: msg(candidate.message) || validated,
+          action: null,
+          confidence: candidate.confidence,
+          data: {},
+        };
+      }
       return {
         type: "command",
         message: msg(candidate.message),
-        action: candidate.action,
+        action: validated,
         confidence: candidate.confidence,
         requires_confirmation: true,
         data: {},
+      };
+    }
+
+    if (candidate.type === "command_sequence") {
+      const raw = candidate.data.actions ?? [];
+      const validated: DroneAction[] = [];
+      const rejected: string[] = [];
+      for (const a of raw) {
+        const v = this.validateActionParams(a);
+        if (typeof v === "string") rejected.push(`${a.name}: ${v}`);
+        else validated.push(v);
+      }
+      if (validated.length === 0) {
+        const detail =
+          rejected.length > 0
+            ? ` Rejected: ${rejected.join("; ")}`
+            : "";
+        return {
+          type: "text",
+          message:
+            (msg(candidate.message) ||
+              "I couldn't break that into valid drone commands. Please rephrase.") +
+            detail,
+          action: null,
+          confidence: candidate.confidence,
+          data: {},
+        };
+      }
+      return {
+        type: "command_sequence",
+        message: msg(candidate.message),
+        action: null,
+        confidence: candidate.confidence,
+        requires_confirmation: true,
+        data: { actions: validated },
+      };
+    }
+
+    if (candidate.type === "navigation") {
+      const route = candidate.data.route;
+      if (!route || !NAV_ROUTE_ALLOWLIST.has(route)) {
+        return {
+          type: "text",
+          message:
+            msg(candidate.message) ||
+            `I can't open that screen — "${route ?? "unknown"}" is not a known route.`,
+          action: null,
+          confidence: candidate.confidence,
+          data: {},
+        };
+      }
+      return {
+        type: "navigation",
+        message: msg(candidate.message),
+        action: null,
+        confidence: candidate.confidence,
+        requires_confirmation: false,
+        data: {
+          route,
+          params: candidate.data.params,
+        },
+      };
+    }
+
+    if (candidate.type === "info") {
+      return {
+        type: "info",
+        message: msg(candidate.message),
+        action: null,
+        confidence: candidate.confidence,
+        requires_confirmation: false,
+        data: { fields: candidate.data.fields },
       };
     }
 
@@ -868,7 +1243,16 @@ export class AiService {
       return { type: "text", message: "Request could not be processed.", action: null, confidence: 0, data: {} };
     }
 
-    if (!["text", "status", "mission_plan", "command"].includes(candidate.type)) {
+    const allowedTypes: AiChatResponse["type"][] = [
+      "text",
+      "info",
+      "status",
+      "mission_plan",
+      "command",
+      "command_sequence",
+      "navigation",
+    ];
+    if (!allowedTypes.includes(candidate.type)) {
       return { type: "text", message: "Request could not be processed.", action: null, confidence: 0, data: {} };
     }
 
@@ -876,19 +1260,26 @@ export class AiService {
       candidate.message != null && String(candidate.message).length > 0
         ? String(candidate.message)
         : "";
+    const sideEffectType =
+      candidate.type === "command" ||
+      candidate.type === "command_sequence" ||
+      candidate.type === "mission_plan";
     return {
       type: candidate.type,
       message: msg,
       action: candidate.action ?? null,
       confidence: typeof candidate.confidence === "number" ? candidate.confidence : 0.8,
       query: candidate.type === "status" ? (candidate.query ?? "ALL") : undefined,
-      requires_confirmation:
-        candidate.type === "command" || candidate.type === "mission_plan"
-          ? (candidate.requires_confirmation ?? true)
-          : undefined,
+      requires_confirmation: sideEffectType
+        ? (candidate.requires_confirmation ?? true)
+        : false,
       data: {
         status: undefined,
         missions: candidate.data?.missions,
+        actions: candidate.data?.actions,
+        route: candidate.data?.route,
+        params: candidate.data?.params,
+        fields: candidate.data?.fields,
       },
     };
   }
@@ -1001,5 +1392,149 @@ export class AiService {
   private toPromptHistory(previousMemory?: AiSessionMemory | null) {
     const maxTurns = Number(this.config.get<string>("AI_MEMORY_TURNS") ?? "20");
     return (previousMemory?.turns ?? []).slice(-Math.max(maxTurns, 2));
+  }
+
+  // ── Info / grounding short-circuit ──────────────────────────────────────
+  // For pure-context questions (time, today, where am I, drone state) we
+  // skip the LLM round-trip and answer directly from `client_context`.
+
+  private isInfoGroundingQuery(message: string): boolean {
+    const lower = message.toLowerCase();
+    if (/\b(what|tell me).*\b(time|date|day)\b/.test(lower)) return true;
+    if (/\b(time|date)\b.*\b(now|today|right now)\b/.test(lower)) return true;
+    if (/^\s*(time|now|today|date)\s*\??\s*$/.test(lower)) return true;
+    if (/\b(what is today|what day is it|what's the date)\b/.test(lower)) return true;
+    if (/\b(mấy giờ|hôm nay là (ngày|thứ)|bây giờ là)\b/.test(lower)) return true;
+    if (/\b(where am i|my location|where i am)\b/.test(lower)) return true;
+    if (/^\s*location\b/.test(lower)) return true;
+    if (/\b(tôi đang ở đâu|vị trí của tôi|ở đâu)\b/.test(lower)) return true;
+    if (/\b(what deployment|which deployment|what site|what project)\b/.test(lower)) return true;
+    if (/\b(what screen|what page|where am i in the app)\b/.test(lower)) return true;
+    return false;
+  }
+
+  private buildInfoResponse(
+    message: string,
+    ctx: ClientContextDto,
+  ): AiChatResponse | null {
+    const lower = message.toLowerCase();
+    const fields: Record<string, string> = {};
+
+    // -- TIME / DATE --------------------------------------------------------
+    if (
+      /\b(time|now|date|day|today)\b/.test(lower) ||
+      /\b(mấy giờ|hôm nay|bây giờ)\b/.test(lower)
+    ) {
+      if (!ctx.now_iso) {
+        return {
+          type: "info",
+          message:
+            "I don't have your device clock yet — please update the app or retry.",
+          action: null,
+          confidence: 1.0,
+          requires_confirmation: false,
+          data: {},
+        };
+      }
+      const tz = ctx.timezone ?? "UTC";
+      fields.now = ctx.now_iso;
+      fields.tz = tz;
+      const isAskingDate = /\b(today|date|day|hôm nay)\b/.test(lower);
+      const isAskingTime = /\b(time|now|mấy giờ|bây giờ)\b/.test(lower);
+      const date = new Date(ctx.now_iso);
+      const human = (() => {
+        try {
+          const fmt = new Intl.DateTimeFormat(ctx.locale ?? "en-US", {
+            timeZone: tz,
+            weekday: "long",
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          return fmt.format(date);
+        } catch {
+          return date.toISOString();
+        }
+      })();
+      let msg = `It is ${human}.`;
+      if (isAskingDate && !isAskingTime) {
+        try {
+          const fmt = new Intl.DateTimeFormat(ctx.locale ?? "en-US", {
+            timeZone: tz,
+            weekday: "long",
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          });
+          msg = `Today is ${fmt.format(date)}.`;
+          fields.today = date.toISOString().slice(0, 10);
+        } catch {
+          /* keep default */
+        }
+      }
+      return {
+        type: "info",
+        message: msg,
+        action: null,
+        confidence: 1.0,
+        requires_confirmation: false,
+        data: { fields },
+      };
+    }
+
+    // -- LOCATION -----------------------------------------------------------
+    if (
+      /\b(location|where am i|my location)\b/.test(lower) ||
+      /\b(ở đâu|vị trí)\b/.test(lower)
+    ) {
+      if (!ctx.phone_location) {
+        return {
+          type: "info",
+          message:
+            "Phone location is not available — enable location permission in Settings.",
+          action: null,
+          confidence: 1.0,
+          requires_confirmation: false,
+          data: {},
+        };
+      }
+      const { latitude, longitude, accuracy_m } = ctx.phone_location;
+      fields.phone_lat = latitude.toFixed(5);
+      fields.phone_lon = longitude.toFixed(5);
+      if (accuracy_m != null) fields.accuracy_m = String(Math.round(accuracy_m));
+      const label = ctx.phone_location_label ?? `${fields.phone_lat}, ${fields.phone_lon}`;
+      const acc = accuracy_m != null ? ` (±${Math.round(accuracy_m)} m)` : "";
+      return {
+        type: "info",
+        message: `You're at ${label}${acc}.`,
+        action: null,
+        confidence: 1.0,
+        requires_confirmation: false,
+        data: { fields },
+      };
+    }
+
+    // -- DEPLOYMENT / ROUTE -------------------------------------------------
+    if (/\b(deployment|site|project)\b/.test(lower)) {
+      // Deployment isn't on ClientContextDto directly; fall through to LLM
+      // (ai.service.chat sees deployment_id in the body and can describe it).
+      return null;
+    }
+    if (/\b(screen|page|app)\b/.test(lower)) {
+      if (!ctx.current_route) return null;
+      fields.current_route = ctx.current_route;
+      return {
+        type: "info",
+        message: `You're on the ${ctx.current_route} screen.`,
+        action: null,
+        confidence: 1.0,
+        requires_confirmation: false,
+        data: { fields },
+      };
+    }
+
+    return null;
   }
 }
