@@ -21,6 +21,32 @@ type Row = {
   note: string | null;
 };
 
+/**
+ * Reserved client-camera ids. These represent system feeds the user is not
+ * allowed to register, mutate, or delete via the public-rtsp surface. The
+ * canonical "Drone Cam" tile is sourced from the DJI bridge / deployment
+ * fixture and must remain immutable from the user's perspective.
+ *
+ * Rule mirrors FE `Manage Feeds Popup` design: drone row has no context menu
+ * and shows "System · cannot edit or delete". The BE check is the
+ * authoritative guard.
+ */
+const RESERVED_CAMERA_IDS: ReadonlySet<string> = new Set([
+  "drone",
+  "drone-cam",
+  "dronecam",
+  "system",
+  "system-drone",
+]);
+
+function isReservedCameraId(id: string): boolean {
+  const k = id.trim().toLowerCase();
+  if (RESERVED_CAMERA_IDS.has(k)) return true;
+  if (k.startsWith("drone:")) return true;
+  if (k.startsWith("system:")) return true;
+  return false;
+}
+
 @Injectable()
 export class PublicRtspService {
   constructor(private readonly supabase: SupabaseService) {}
@@ -122,6 +148,13 @@ export class PublicRtspService {
         const url = typeof o.url === "string" ? o.url.trim() : "";
         if (!id || !name || !url) {
           throw new BadRequestException({ message: "Each camera requires id, name, and url." });
+        }
+        if (isReservedCameraId(id)) {
+          // Drone cam is a system feature and must never be writable through
+          // the user-CRUD endpoint (no add / no rename / no delete by id).
+          throw new BadRequestException({
+            message: `Camera id "${id}" is reserved for system feeds (drone cam) and cannot be modified.`,
+          });
         }
         const lower = url.toLowerCase();
         const okScheme =
