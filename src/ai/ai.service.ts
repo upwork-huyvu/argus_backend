@@ -143,6 +143,22 @@ export class AiService {
   }
 
   async chat(identity: AuthedIdentity, body: AiChatRequestDto): Promise<AiChatResponse> {
+    return this.computeChat(identity, body);
+  }
+
+  /**
+   * Core chat pipeline shared by the non-streaming {@link chat} and the
+   * streaming {@link chatStream}. When `onToken` is supplied, the freeform LLM
+   * reply is streamed delta-by-delta through it (Tier B latency overlap);
+   * when it is omitted the behavior is byte-for-byte identical to the legacy
+   * non-streaming `/ai/chat` path. All side effects (memory persistence,
+   * structured envelope, constraint enforcement) are unchanged.
+   */
+  private async computeChat(
+    identity: AuthedIdentity,
+    body: AiChatRequestDto,
+    onToken?: (delta: string) => void,
+  ): Promise<AiChatResponse> {
     const availableMissions = await this.resolveAvailableMissions(identity, body);
     const userMessage = body.user_message.trim();
     const sessionKey = this.buildSessionKey(identity.userId, body.deployment_id, body.drone_id);
@@ -258,7 +274,11 @@ export class AiService {
         ),
       );
       if (response.type === "text" && !response.message.trim()) {
-        const fill = await this.tryLlmFreeformChat(userMessage, this.toPromptHistory(previousMemory));
+        const fill = await this.tryLlmFreeformChat(
+          userMessage,
+          this.toPromptHistory(previousMemory),
+          onToken,
+        );
         if (fill?.trim()) {
           response = { ...response, message: fill.trim() };
         }
@@ -268,7 +288,7 @@ export class AiService {
     }
 
     const response = this.safeResponse(
-      await this.buildSmartFallback(userMessage, availableMissions, previousMemory),
+      await this.buildSmartFallback(userMessage, availableMissions, previousMemory, onToken),
     );
     await this.persistMemory(sessionKey, response, userMessage, previousMemory);
     return response;
@@ -451,6 +471,7 @@ export class AiService {
     userMessage: string,
     availableMissions: MissionInput[],
     previousMemory?: AiSessionMemory | null,
+    onToken?: (delta: string) => void,
   ): Promise<AiChatResponse> {
     const guidance = this.heuristicOperationalGuidance(userMessage);
     if (guidance) {
@@ -493,7 +514,11 @@ export class AiService {
       };
     }
 
-    const freeform = await this.tryLlmFreeformChat(userMessage, this.toPromptHistory(previousMemory));
+    const freeform = await this.tryLlmFreeformChat(
+      userMessage,
+      this.toPromptHistory(previousMemory),
+      onToken,
+    );
     if (freeform !== null) {
       return { type: "text", message: freeform, action: null, confidence: 0.7, data: {} };
     }
@@ -501,10 +526,16 @@ export class AiService {
     return { type: "text", message: "", action: null, confidence: 0, data: {} };
   }
 
-  /** Plain chat completion—no JSON envelope. Used when structured chat fails or is skipped. */
+  /**
+   * Plain chat completion—no JSON envelope. Used when structured chat fails or
+   * is skipped. When `onToken` is supplied, the reply is streamed token-by-token
+   * (the streaming OpenAI API) and each delta is forwarded; the full assembled
+   * text is still returned. Without `onToken` it behaves exactly as before.
+   */
   private async tryLlmFreeformChat(
     userMessage: string,
     chatHistory: Array<{ role: "user" | "assistant"; content: string; responseType?: string; at: string }>,
+    onToken?: (delta: string) => void,
   ): Promise<string | null> {
     const apiKey = this.config.get<string>("OPENAI_API_KEY")?.trim();
     if (!apiKey) return null;
@@ -514,6 +545,19 @@ export class AiService {
       role: t.role as "user" | "assistant",
       content: t.content,
     }));
+    const messages = [
+      {
+        role: "system",
+        content:
+          "You are ARGUS, a drone operations assistant. Reply in plain text only — no JSON. 1-2 sentences unless asked for more. Be direct and operational.",
+      },
+      ...historyMsgs,
+      { role: "user", content: userMessage },
+    ];
+
+    if (onToken) {
+      return this.streamOpenAiFreeform(apiKey, model, messages, onToken);
+    }
 
     try {
       const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -526,15 +570,7 @@ export class AiService {
           model,
           ...this.openAiTemperatureParams(model, 0.75),
           ...this.openAiTokenLimitParams(model, 1024),
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are ARGUS, a drone operations assistant. Reply in plain text only — no JSON. 1-2 sentences unless asked for more. Be direct and operational.",
-            },
-            ...historyMsgs,
-            { role: "user", content: userMessage },
-          ],
+          messages,
         }),
       });
 
@@ -560,6 +596,132 @@ export class AiService {
       );
       return null;
     }
+  }
+
+  /**
+   * Streaming counterpart of {@link tryLlmFreeformChat}: calls OpenAI with
+   * `stream:true`, parses the SSE `data:` frames, forwards each content delta to
+   * `onToken`, and returns the fully assembled text (or null on failure). Used
+   * only by {@link chatStream} (Tier B) so TTS can begin while the LLM is still
+   * generating. The legacy non-streaming helper is untouched.
+   */
+  private async streamOpenAiFreeform(
+    apiKey: string,
+    model: string,
+    messages: Array<{ role: string; content: string }>,
+    onToken: (delta: string) => void,
+  ): Promise<string | null> {
+    try {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          ...this.openAiTemperatureParams(model, 0.75),
+          ...this.openAiTokenLimitParams(model, 1024),
+          messages,
+          stream: true,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        const errText = await response.text().catch(() => "");
+        if (this.isOpenAiInsufficientQuota(response.status, errText)) {
+          this.logger.warn("OpenAI insufficient_quota (freeform stream)");
+          onToken(OPENAI_INSUFFICIENT_QUOTA_MESSAGE);
+          return OPENAI_INSUFFICIENT_QUOTA_MESSAGE;
+        }
+        this.logger.warn(
+          `OpenAI freeform stream HTTP ${response.status}: ${errText.slice(0, 400)}`,
+        );
+        return null;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let assembled = "";
+
+      const handleLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) return;
+        const payload = trimmed.slice("data:".length).trim();
+        if (!payload || payload === "[DONE]") return;
+        try {
+          const json = JSON.parse(payload) as {
+            choices?: Array<{ delta?: { content?: string } }>;
+          };
+          const delta = json.choices?.[0]?.delta?.content;
+          if (delta) {
+            assembled += delta;
+            onToken(delta);
+          }
+        } catch {
+          // Ignore keep-alive / non-JSON lines.
+        }
+      };
+
+      // Node's `fetch` returns a web ReadableStream that is async-iterable.
+      for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let nlIndex: number;
+        while ((nlIndex = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nlIndex);
+          buffer = buffer.slice(nlIndex + 1);
+          handleLine(line);
+        }
+      }
+      if (buffer.trim()) handleLine(buffer);
+
+      const text = assembled.trim();
+      return text.length > 0 ? text : null;
+    } catch (error) {
+      this.logger.warn(
+        `LLM freeform stream failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Streaming entry point for `POST /ai/chat/stream` (Tier B). Runs the exact
+   * same pipeline as {@link chat} (intent detection, structured envelope,
+   * constraint enforcement, memory persistence) but streams the freeform LLM
+   * prose through `emit.token` as it is generated. Emits the structured
+   * envelope via `emit.meta` (message omitted) and the fully reconciled
+   * response via `emit.done`. For non-LLM / canned / structured replies (no
+   * prose stream) the single `message` is emitted once as a `token` so the
+   * client can still speak it. Returns the final response for logging.
+   */
+  async chatStream(
+    identity: AuthedIdentity,
+    body: AiChatRequestDto,
+    emit: {
+      meta: (envelope: Omit<AiChatResponse, "message">) => void;
+      token: (delta: string) => void;
+      done: (response: AiChatResponse) => void;
+    },
+  ): Promise<AiChatResponse> {
+    let streamedAny = false;
+    const onToken = (delta: string) => {
+      if (!delta) return;
+      streamedAny = true;
+      emit.token(delta);
+    };
+
+    const response = await this.computeChat(identity, body, onToken);
+
+    // Structured envelope without the prose (the prose arrived as token deltas).
+    const envelope = { ...response } as Partial<AiChatResponse>;
+    delete envelope.message;
+    emit.meta(envelope as Omit<AiChatResponse, "message">);
+    if (!streamedAny && response.message) {
+      emit.token(response.message);
+    }
+    emit.done(response);
+    return response;
   }
 
   private heuristicOperationalGuidance(
