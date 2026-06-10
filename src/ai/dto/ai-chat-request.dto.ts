@@ -119,8 +119,11 @@ export class ClientContextDto {
 }
 
 export class AiChatRequestDto {
+  // ~4000 chars ≈ a long spoken question (Scribe commits a whole utterance on
+  // VAD silence; length is unbounded by the protocol). Generous headroom so a
+  // verbose voice question is answered, not rejected with HTTP 400.
   @IsString()
-  @MaxLength(1000)
+  @MaxLength(4000)
   user_message: string;
 
   @IsOptional()
