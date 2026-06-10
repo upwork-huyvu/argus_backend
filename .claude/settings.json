@@ -1,10 +1,15 @@
 {
   "permissions": {
+    "additionalDirectories": [
+      "/Users/drakenvu/Documents/MacMiniDocuments/upwork/argus/mobile/argus_react_native",
+      "/Users/drakenvu/Documents/MacMiniDocuments/upwork/argus/mobile/docs"
+    ],
     "allow": [
       "Bash(./gradlew assembleDebug)",
       "Bash(./gradlew :expo-speech-recognition:compileDebugKotlin)",
       "Bash(tar -xzf pkg.tgz package/src/)",
       "Read(//private/tmp/**)",
+      "Read(//Users/drakenvu/Documents/MacMiniDocuments/upwork/argus/mobile/**)",
       "Bash(grep -E \"^dji/common/camera/.*\\\\.class$|^dji/sdk/camera/.*\\\\.class$\")",
       "Bash(grep -iv \"\\\\$\")",
       "Bash(grep \"\\\\.class$\")",
@@ -17,7 +22,16 @@
       "Bash(javap -p -classpath dji-sdk-provided-4.18.jar dji.sdk.media.MediaFile)",
       "Bash(javap -p -classpath dji-sdk-provided-4.18.jar dji.sdk.media.FetchMediaTaskScheduler)",
       "Bash(javap -p -classpath dji-sdk-provided-4.18.jar dji.common.camera.StorageState)",
-      "Bash(./gradlew :app:compileDebugJavaWithJavac)"
+      "Bash(./gradlew :app:compileDebugJavaWithJavac)",
+      "Bash(npm run build)",
+      "Bash(npm run lint)",
+      "Bash(npm run test)",
+      "Bash(npm run test:cov)",
+      "Bash(npm run format)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
     ]
   }
 }
