@@ -257,6 +257,35 @@ export class AiService {
       }
     }
 
+    // Fast intent gate (FR-1): on the streaming path only, a clearly
+    // conversational message skips the structured OpenAI round-trip and streams
+    // the freeform reply directly — one model call instead of two, halving
+    // time-to-first-token for plain chat. Conservative by design: only
+    // `type:"text"` messages with NO command / mission / status / info / nav
+    // signal take this path; everything else falls through to the full
+    // structured pass below (unchanged). The non-streaming `chat()` path (no
+    // `onToken`) never enters here, so `/ai/chat` stays byte-for-byte identical.
+    if (onToken && intent === "text" && this.isClearlyConversational(userMessage)) {
+      const streamed = await this.tryLlmFreeformChat(
+        userMessage,
+        this.toPromptHistory(previousMemory),
+        onToken,
+      );
+      if (streamed?.trim()) {
+        const response = this.safeResponse({
+          type: "text",
+          message: streamed.trim(),
+          action: null,
+          confidence: 0.7,
+          data: {},
+        });
+        await this.persistMemory(sessionKey, response, userMessage, previousMemory);
+        return response;
+      }
+      // Freeform yielded nothing (no API key / transport failure) → fall through
+      // to the structured pass so behavior degrades exactly as before.
+    }
+
     const llm = await this.tryLlmStructured({
       userMessage,
       availableMissions,
@@ -346,6 +375,66 @@ export class AiService {
       return "mission_plan";
     }
     return "text";
+  }
+
+  /**
+   * Fast, deterministic gate for the streaming path (FR-1). Returns true ONLY
+   * when `message` is clearly conversational small-talk — i.e. it carries no
+   * signal that it could be a drone command, mission / ops request, status
+   * query, info-grounding lookup, or an in-app navigation request. When this is
+   * true (and `onToken` is present) `computeChat` skips the structured OpenAI
+   * round-trip and streams the freeform reply directly.
+   *
+   * Intentionally false-negative-biased: any doubt → false → fall through to
+   * the full structured pass (today's behavior). A miss only costs a slightly
+   * slower-but-correct answer; a false positive would lose action / mission
+   * classification — so this requires positive small-talk AND the absence of
+   * any ops signal in BOTH English and Vietnamese.
+   */
+  private isClearlyConversational(message: string): boolean {
+    const text = message.trim();
+    if (!text) return false;
+    const lower = text.toLowerCase();
+
+    // Mission / ops planning, status query, or info-grounding → structured.
+    if (this.wantsMissionOrOpsPlanning(text)) return false;
+    if (this.isInfoGroundingQuery(text)) return false;
+
+    // Explicit drone-action / flight verbs (English). Includes free-form ORBIT
+    // phrasings ("circle the building", "go around once") — DRONE_ACTIONS.ORBIT
+    // exists precisely to catch these, so they must NOT be treated as chit-chat.
+    if (
+      /\b(take ?off|takeoff|landing|\bland\b|return home|rtl|hover|follow me|way ?point|orbit|orbit around|circle|circling|fly around|go around|ascend|descend|go up|go down|fly|flight)\b/.test(
+        lower,
+      )
+    ) {
+      return false;
+    }
+    // Imperative command verbs aimed at the drone / a mission.
+    if (/\b(launch|execute|abort|cancel|pause|resume|emergency)\b/.test(lower)) return false;
+    if (/\b(run|start|stop)\b/.test(lower)) return false;
+    // In-app navigation requests.
+    if (/\b(open|go to|navigate|show me|take me to|switch to)\b/.test(lower)) return false;
+    // Drone / telemetry nouns → likely status or command even if phrased as a question.
+    if (
+      /\b(drone|uav|aircraft|quad|multicopter|ark|battery|telemetry|gps|altitude|signal|mission|missions|patrol|survey|waypoint)\b/.test(
+        lower,
+      )
+    ) {
+      return false;
+    }
+    // Drone-action / ops / nav / status signals (Vietnamese).
+    if (
+      /(cất cánh|hạ cánh|đáp khẩn|máy bay|thiết bị bay|\bdrone\b|\bbay\b|lơ lửng|giữ vị trí|quay về|trở về|về nhà|theo tôi|bay vòng|vòng quanh|lên cao|xuống thấp|điểm bay|nhiệm vụ|tuần tra|khảo sát|\bpin\b|tín hiệu|độ cao|tốc độ|trạng thái|mở (màn hình|trang|cài đặt|bản đồ)|đi tới|chuyển tới|hiển thị)/.test(
+        lower,
+      )
+    ) {
+      return false;
+    }
+
+    // Survived every negative filter and `detectIntent` already classified it
+    // as "text" → treat as conversational small-talk.
+    return true;
   }
 
   private buildStatusResponse(message: string): AiChatResponse {

@@ -156,13 +156,35 @@ export class AiController {
       res.flush?.();
     };
 
+    // Heartbeat comment frame defeats proxy/serverless idle-buffering (FR-2/FR-4)
+    // so the first real frames are not held back on Vercel. It is a comment
+    // (`:ping`), not an `event:`/`data:` frame, so the FE SSE parser skips it.
+    const heartbeat = setInterval(() => {
+      res.write(":ping\n\n");
+      res.flush?.();
+    }, 15_000);
+
+    // Telemetry to diagnose/prove the TTFT win (FR-5): time to first token,
+    // time to the structured envelope, total time, and whether prose actually
+    // streamed incrementally (≥2 token frames) vs a single canned emit.
+    let firstTokenAt: number | undefined;
+    let metaAt: number | undefined;
+    let tokenFrames = 0;
+
     try {
       const result = await this.ai.chatStream(identity, body, {
-        meta: (envelope) => send("meta", envelope),
-        token: (delta) => send("token", { delta }),
+        meta: (envelope) => {
+          if (metaAt === undefined) metaAt = Date.now();
+          send("meta", envelope);
+        },
+        token: (delta) => {
+          if (firstTokenAt === undefined) firstTokenAt = Date.now();
+          tokenFrames += 1;
+          send("token", { delta });
+        },
         done: (response) => send("done", response),
       });
-      const latencyMs = Date.now() - startedAt;
+      const totalMs = Date.now() - startedAt;
       this.logger.log(
         JSON.stringify({
           event: "ai_chat_stream_completed",
@@ -173,7 +195,12 @@ export class AiController {
           responseType: result.type,
           missionCount: result.data.missions?.length ?? 0,
           statusKeys: Object.keys(result.data.status ?? {}).length,
-          latencyMs,
+          firstTokenMs: firstTokenAt !== undefined ? firstTokenAt - startedAt : null,
+          metaMs: metaAt !== undefined ? metaAt - startedAt : null,
+          streamedIncrementally: tokenFrames > 1,
+          totalMs,
+          // Kept for backward-compatible log consumers (was the only field before).
+          latencyMs: totalMs,
         }),
       );
     } catch (error) {
@@ -183,6 +210,7 @@ export class AiController {
       // The stream has already started (headers sent); surface a frame, not a 500.
       send("error", { message: "AI chat failed. Please try again." });
     } finally {
+      clearInterval(heartbeat);
       res.end();
     }
   }
