@@ -88,11 +88,20 @@ export class VoiceService {
 
     const ttlSeconds = Number(this.config.get<string>("ELEVENLABS_TOKEN_TTL_SECONDS") ?? "60") || 60;
 
+    const voiceId = this.config.get<string>("ELEVENLABS_VOICE_ID")?.trim() || "";
+    if (!voiceId) {
+      // STT still works without it, but the TTS WebSocket URL needs a voiceId —
+      // an empty value makes client-side TTS fail silently. Surface it loudly.
+      this.logger.error(
+        "ELEVENLABS_VOICE_ID is not configured — client TTS playback will fail (empty voiceId). Set ELEVENLABS_VOICE_ID in the environment.",
+      );
+    }
+
     return {
       sttToken,
       ttsToken,
       expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
-      voiceId: this.config.get<string>("ELEVENLABS_VOICE_ID")?.trim() || "",
+      voiceId,
       sttModel: this.config.get<string>("ELEVENLABS_STT_MODEL")?.trim() || "scribe_v2_realtime",
       ttsModel: this.config.get<string>("ELEVENLABS_TTS_MODEL")?.trim() || "eleven_flash_v2_5",
       outputFormat: this.config.get<string>("ELEVENLABS_OUTPUT_FORMAT")?.trim() || "pcm_24000",
