@@ -19,6 +19,15 @@ function extractMessage(responsePayload: unknown): string | undefined {
   return undefined;
 }
 
+/** Machine-readable error code, when the thrown exception carries one (ApiException). */
+function extractCode(responsePayload: unknown): string | undefined {
+  if (responsePayload && typeof responsePayload === "object") {
+    const code = (responsePayload as Record<string, unknown>).code;
+    if (typeof code === "string") return code;
+  }
+  return undefined;
+}
+
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
@@ -36,8 +45,12 @@ export class HttpExceptionFilter implements ExceptionFilter {
         ? extractMessage(exception.getResponse()) ?? exception.message
         : (exception as any)?.message ?? "Internal server error";
 
-    // Keep response shape consistent for RN.
-    res.status(status).json({ message });
+    const code =
+      exception instanceof HttpException ? extractCode(exception.getResponse()) : undefined;
+
+    // Keep response shape consistent for RN. `code` is only present when the
+    // thrown exception carried one (ApiException) — optional by design.
+    res.status(status).json(code ? { message, code } : { message });
   }
 }
 

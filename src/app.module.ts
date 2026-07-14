@@ -14,6 +14,9 @@ import { PublicRtspModule } from "./public-rtsp/public-rtsp.module";
 import { AiModule } from "./ai/ai.module";
 import { AdminModule } from "./admin/admin.module";
 import { ChatModule } from "./chat/chat.module";
+import { MqttModule } from "./mqtt/mqtt.module";
+import { DrawerControllersModule } from "./drawer-controllers/drawer-controllers.module";
+import { DrawerCommandsModule } from "./drawer-commands/drawer-commands.module";
 import path from "node:path";
 
 @Module({
@@ -60,6 +63,9 @@ import path from "node:path";
     AiModule,
     AdminModule,
     ChatModule,
+    MqttModule,
+    DrawerControllersModule,
+    DrawerCommandsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

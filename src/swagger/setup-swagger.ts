@@ -55,6 +55,8 @@ export async function setupSwagger(app: INestApplication) {
         { type: "http", scheme: "bearer", bearerFormat: "JWT" },
         "bearerAuth",
       )
+      // Shared device key for ESP32 registration (X-Controller-Key).
+      .addApiKey({ type: "apiKey", in: "header", name: "X-Controller-Key" }, "controllerKey")
       .build();
 
     const document = SwaggerModule.createDocument(app, config);

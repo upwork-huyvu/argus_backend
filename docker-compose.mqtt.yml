@@ -1,0 +1,23 @@
+# Local MQTT broker for drawer-controller MVP development.
+# See docs/ESP32_DEVICE_MVP_PLAN.md §15 Phase 1.
+#
+#   docker compose -f docker-compose.mqtt.yml up -d
+#
+# Anonymous access is enabled for LOCAL DEV ONLY. Add auth + TLS (mqtts://)
+# before pilot — see the risk table in the plan §18.
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: argus-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883" # MQTT
+      - "9001:9001" # MQTT over WebSocket (optional)
+    volumes:
+      - ./infra/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - argus_mosquitto_data:/mosquitto/data
+      - argus_mosquitto_log:/mosquitto/log
+
+volumes:
+  argus_mosquitto_data:
+  argus_mosquitto_log:
