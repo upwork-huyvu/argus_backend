@@ -305,6 +305,21 @@ export class AuthService {
     return this.normalizeProfile(profile, profile.email ?? "");
   }
 
+  /**
+   * Upload an avatar image to Supabase Storage and persist the public URL on
+   * the user's app_users row.
+   *
+   * Bucket: `avatars` (public). Files are namespaced under `{userId}/`, so a
+   * tighter policy can be added later without breaking the URL shape:
+   *
+   *   -- Recommended Storage policies (idempotent):
+   *   --   allow public SELECT on bucket `avatars`
+   *   --   restrict INSERT/UPDATE/DELETE to service_role
+   *   --   (or to authenticated users where (storage.foldername(name))[1] = auth.uid()::text)
+   *
+   * Allowed input: image/* MIME, ≤ 5 MB. Anything else → BadRequest with a
+   * clear message so the FE can surface it.
+   */
   async uploadAvatar(
     userId: string,
     file: { buffer: Buffer; mimetype: string; size: number; originalname?: string },
@@ -390,7 +405,13 @@ export class AuthService {
     }
     if (patch.phone !== undefined) update.phone = patch.phone.trim() || null;
     if (patch.organization !== undefined) update.organization = patch.organization.trim() || null;
-    if (patch.avatarUrl !== undefined) update.avatar_url = patch.avatarUrl.trim() || null;
+    if (patch.avatarUrl !== undefined) {
+      // DTO already restricts shape (https only or empty). Re-validate here as
+      // defense in depth so a misconfigured pipe / direct service call still
+      // blocks file:, content:, http:, data:, etc., and only accepts URLs that
+      // actually live on this project's Supabase Storage host.
+      update.avatar_url = this.normalizeAvatarUrlOrThrow(patch.avatarUrl);
+    }
 
     if (Object.keys(update).length === 0) {
       // Nothing to change — return the current profile rather than hitting the DB.
@@ -411,6 +432,42 @@ export class AuthService {
     if (!data) throw new UnauthorizedException("Profile not found.");
 
     return this.normalizeProfile(data, data.email ?? "");
+  }
+
+  /**
+   * Validate a caller-supplied avatar URL. Returns the trimmed URL or `null`
+   * (for clear). Throws BadRequest for anything that isn't a Supabase Storage
+   * URL on this project's configured host.
+   */
+  private normalizeAvatarUrlOrThrow(raw: string): string | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      throw new BadRequestException("avatarUrl must be an https:// URL.");
+    }
+    if (parsed.protocol !== "https:") {
+      throw new BadRequestException("avatarUrl must use https://.");
+    }
+
+    const supabaseUrl = this.config.get<string>("SUPABASE_URL");
+    if (supabaseUrl) {
+      let expectedHost: string;
+      try {
+        expectedHost = new URL(supabaseUrl).host;
+      } catch {
+        throw new InternalServerErrorException("Misconfigured SUPABASE_URL.");
+      }
+      if (parsed.host !== expectedHost) {
+        throw new BadRequestException(
+          "avatarUrl must be a Supabase Storage URL on this project.",
+        );
+      }
+    }
+    return trimmed;
   }
 
   // ---------------------------------------------------------------------------

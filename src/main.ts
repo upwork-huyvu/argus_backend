@@ -1,6 +1,8 @@
 import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { ConfigService } from "@nestjs/config";
+import compression from "compression";
+import type { Request, Response } from "express";
 import { AppModule } from "./app.module";
 import { HttpExceptionFilter } from "./common/errors/http-exception.filter";
 import { setupSwagger } from "./swagger/setup-swagger";
@@ -15,6 +17,22 @@ async function bootstrap() {
       whitelist: true,
       transform: true,
       forbidUnknownValues: true,
+    }),
+  );
+
+  // Register compression so `res.flush()` is a real function on the SSE
+  // streaming endpoint (it was a no-op without this). The filter returns false
+  // for `text/event-stream` so SSE frames are NOT gzip-buffered by the
+  // compressor — we only want the flush hook.
+  app.use(
+    compression({
+      filter: (req: Request, res: Response) => {
+        const contentType = res.getHeader("Content-Type");
+        if (typeof contentType === "string" && contentType.includes("text/event-stream")) {
+          return false;
+        }
+        return compression.filter(req, res);
+      },
     }),
   );
 
