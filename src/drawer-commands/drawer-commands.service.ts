@@ -140,6 +140,19 @@ export class DrawerCommandsService {
     let inserted: CommandRow;
 
     if (existing) {
+      // An Idempotency-Key identifies ONE intent. Reusing it for a different
+      // command type must not silently replay the old command — the caller would
+      // believe their DRAWER_CLOSE was handled while nothing was ever sent, and
+      // the response would even report the wrong type. Reject instead (same
+      // "reused with different parameters" rule as Stripe). expiresInSeconds is
+      // only a TTL hint and is deliberately not part of the identity.
+      if (existing.type !== dto.type) {
+        throw new ApiException(
+          409,
+          "IDEMPOTENCY_KEY_REUSED",
+          `Idempotency-Key '${idem}' was already used for ${existing.type} (command ${existing.id}). Use a new key for ${dto.type}.`,
+        );
+      }
       if (!this.neverReachedDevice(existing)) return this.toView(existing);
       const rearmed = await this.markCommand(existing.id, {
         status: "PENDING",
