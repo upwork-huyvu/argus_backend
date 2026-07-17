@@ -29,17 +29,14 @@ import { safeParseJson, type CommandPayload, type PresencePayload } from "./mqtt
 export class MqttService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MqttService.name);
   private client: MqttClient | null = null;
-  private readonly heartbeatMs: number;
 
+  /** `lastSeen` is diagnostics only — liveness comes from `online`. See isControllerOnline(). */
   private readonly presence = new Map<string, { online: boolean; lastSeen: number }>();
 
   constructor(
     private readonly config: ConfigService,
     private readonly handler: MqttMessageHandlerService,
-  ) {
-    this.heartbeatMs =
-      Number(this.config.get<string>("DRAWER_HEARTBEAT_TIMEOUT_SECONDS") ?? 90) * 1000;
-  }
+  ) {}
 
   onModuleInit(): void {
     // `|| default` (not `??`) so an empty MQTT_URL="" also falls back.
@@ -135,11 +132,23 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
     this.presence.set(controllerId, entry);
   }
 
-  /** True only when we have recent, ONLINE presence for this controller. */
+  /**
+   * Presence-driven liveness. MQTT presence + the retained OFFLINE Last Will are
+   * the authority — when the device drops, the broker publishes the will and we
+   * flip to offline here.
+   *
+   * Deliberately NOT gated on "recent traffic": an idle-but-connected controller
+   * publishes nothing for minutes (MQTT keepalive is device↔broker only and
+   * never reaches the backend), so a freshness window reports a perfectly
+   * healthy drawer as offline and refuses every command.
+   *
+   * Trade-off: a hung device whose TCP stays open still looks online, so a
+   * command gets published and then EXPIREs via the reconciler — visible and
+   * safe, unlike a false SUCCEEDED. Re-introducing a staleness window requires
+   * the firmware to publish a periodic heartbeat first.
+   */
   isControllerOnline(controllerId: string): boolean {
-    const entry = this.presence.get(controllerId);
-    if (!entry || !entry.online) return false;
-    return Date.now() - entry.lastSeen <= this.heartbeatMs;
+    return this.presence.get(controllerId)?.online ?? false;
   }
 
   get connected(): boolean {
