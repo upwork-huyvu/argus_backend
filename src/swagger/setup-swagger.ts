@@ -63,7 +63,31 @@ export async function setupSwagger(app: INestApplication) {
 
     SwaggerModule.setup("docs", app, document, {
       ...(distDir ? { customSwaggerUiPath: distDir } : {}),
-      swaggerOptions: { persistAuthorization: true },
+      swaggerOptions: {
+        persistAuthorization: true,
+        /**
+         * Auto-fill Idempotency-Key with a fresh UUID on every "Execute".
+         *
+         * Without this you either type one by hand or reuse a constant — and a
+         * reused key replays the first command forever instead of sending a new
+         * one. Runs in the browser: @nestjs/swagger serializes this function into
+         * the Swagger init script.
+         */
+        requestInterceptor: (req: { headers?: Record<string, string> }) => {
+          const h = req.headers ?? (req.headers = {});
+          const key = Object.keys(h).find((k) => k.toLowerCase() === "idempotency-key");
+          const uuid =
+            (globalThis.crypto as Crypto | undefined)?.randomUUID?.() ??
+            "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+              const r = (Math.random() * 16) | 0;
+              return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+            });
+          // Only fill it in when the user left it blank; a key they typed on
+          // purpose (to test a replay) must be preserved.
+          if (!key || !h[key]) h["Idempotency-Key"] = uuid;
+          return req;
+        },
+      },
       customSiteTitle: "Argus API Docs",
     });
   } catch (err) {

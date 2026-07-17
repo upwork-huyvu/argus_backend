@@ -32,7 +32,16 @@ export class DrawerCommandsController {
 
   @Post()
   @HttpCode(202)
-  @ApiHeader({ name: "Idempotency-Key", required: true })
+  @ApiHeader({
+    name: "Idempotency-Key",
+    required: false,
+    description:
+      "Optional UUID identifying ONE intent. Send the same key when retrying the same " +
+      "press and the original command is replayed (replayed: true) instead of running " +
+      "the motor twice. Must be a UUID — a constant like '1' is rejected. Omit it and " +
+      "the server generates one. Swagger fills a fresh UUID automatically.",
+    schema: { type: "string", format: "uuid" },
+  })
   @ApiBody({ type: CreateDrawerCommandDto })
   @ApiOkResponse({ description: "202 Accepted — command queued/published." })
   async create(
