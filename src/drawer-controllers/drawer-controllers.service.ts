@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { SupabaseService } from "../common/supabase/supabase.service";
 import { ApiException } from "../common/errors/api-exception";
+import { MqttService } from "../mqtt/mqtt.service";
 import { normalizeMac } from "./mac.util";
 import type { RegisterControllerDto } from "./dto/register-controller.dto";
 
@@ -34,7 +35,67 @@ export type RegistrationResult = {
 export class DrawerControllersService {
   private readonly logger = new Logger(DrawerControllersService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly mqtt: MqttService,
+  ) {}
+
+  /**
+   * Owner-scoped current state of a drawer: what the device last REPORTED
+   * (sensor-confirmed), not what we asked it to do. This is the source of truth
+   * for the UI and for launch-gating — see docs/ESP32_DEVICE_MVP_PLAN.md §11.
+   *
+   * `drawerState` is null when the controller has never published state yet.
+   */
+  async getStateForArk(userId: string, arkId: string, controllerId: string) {
+    const admin = this.supabase.getAdminClient();
+
+    // Ownership enforced in code (RLS is bypassed with the service-role key).
+    const { data: ark } = await admin
+      .from("arks")
+      .select("id")
+      .eq("id", arkId)
+      .eq("user_id", userId)
+      .maybeSingle<{ id: string }>();
+    if (!ark) throw new ApiException(404, "ARK_NOT_FOUND", "Ark not found or not owned by you.");
+
+    const { data: controller } = await admin
+      .from("drawer_controllers")
+      .select("id,lifecycle_status,last_seen_at")
+      .eq("id", controllerId)
+      .eq("ark_id", arkId)
+      .maybeSingle<{ id: string; lifecycle_status: LifecycleStatus; last_seen_at: string | null }>();
+    if (!controller) {
+      throw new ApiException(404, "CONTROLLER_NOT_FOUND", "Controller not found under this ark.");
+    }
+
+    const { data: state } = await admin
+      .from("drawer_state")
+      .select("drawer_state,light_state,lock_state,sensor_state,boot_id,reported_at")
+      .eq("drawer_controller_id", controllerId)
+      .maybeSingle<{
+        drawer_state: string | null;
+        light_state: string | null;
+        lock_state: string | null;
+        sensor_state: Record<string, unknown> | null;
+        boot_id: string | null;
+        reported_at: string | null;
+      }>();
+
+    return {
+      controllerId,
+      arkId,
+      lifecycleStatus: controller.lifecycle_status,
+      online: this.mqtt.isControllerOnline(controllerId),
+      lastSeenAt: controller.last_seen_at,
+      drawerState: state?.drawer_state ?? null,
+      lightState: state?.light_state ?? null,
+      lockState: state?.lock_state ?? null,
+      sensorState: state?.sensor_state ?? null,
+      bootId: state?.boot_id ?? null,
+      reportedAt: state?.reported_at ?? null,
+    };
+  }
 
   /**
    * Idempotent create-or-update keyed by normalized MAC.
