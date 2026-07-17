@@ -10,15 +10,37 @@ export class SupabaseService {
   private readonly bypassRls: boolean;
 
   constructor(private readonly config: ConfigService) {
-    const url = this.config.get<string>("SUPABASE_URL");
-    const anon = this.config.get<string>("SUPABASE_ANON_KEY");
-    const serviceRole = this.config.get<string>("SUPABASE_SERVICE_ROLE_KEY");
+    const url = this.config.get<string>("SUPABASE_URL")?.trim();
+    const anon = this.config.get<string>("SUPABASE_ANON_KEY")?.trim();
+    const serviceRole = this.config.get<string>("SUPABASE_SERVICE_ROLE_KEY")?.trim();
     const jwtSecret = this.config.get<string>("JWT_SECRET");
     const disableRlsFlag = this.config.get<string>("SUPABASE_DISABLE_RLS");
 
-    if (!url) throw new Error("Missing SUPABASE_URL");
-    if (!anon) throw new Error("Missing SUPABASE_ANON_KEY");
-    if (!serviceRole) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+    // Report ALL missing vars at once, plus what the process can actually see.
+    // Env files are gitignored and never deployed, so on Railway/Vercel these
+    // must come from the service's Variables. Names only — never log values.
+    if (!url || !anon || !serviceRole) {
+      const missing = [
+        ["SUPABASE_URL", url],
+        ["SUPABASE_ANON_KEY", anon],
+        ["SUPABASE_SERVICE_ROLE_KEY", serviceRole],
+      ]
+        .filter(([, value]) => !value)
+        .map(([name]) => name);
+      const visible = Object.keys(process.env)
+        .filter((k) => k.toUpperCase().includes("SUPABASE"))
+        .sort();
+      throw new Error(
+        `Missing required Supabase env var(s): ${missing.join(", ")}. ` +
+          `NODE_ENV=${process.env.NODE_ENV ?? "(unset)"}. ` +
+          `SUPABASE-like keys visible to this process: ${
+            visible.length > 0 ? visible.join(", ") : "(none)"
+          }. ` +
+          `Total env keys visible: ${Object.keys(process.env).length}. ` +
+          `Set these in your host's Variables (Railway/Vercel) — .env files are ` +
+          `gitignored and are never deployed.`,
+      );
+    }
 
     this.supabaseUrl = url;
     this.anonKey = anon;

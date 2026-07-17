@@ -18,6 +18,7 @@ import { ChatModule } from "./chat/chat.module";
 import { MqttModule } from "./mqtt/mqtt.module";
 import { DrawerControllersModule } from "./drawer-controllers/drawer-controllers.module";
 import { DrawerCommandsModule } from "./drawer-commands/drawer-commands.module";
+import { DronesModule } from "./drones/drones.module";
 import path from "node:path";
 
 @Module({
@@ -68,6 +69,7 @@ import path from "node:path";
     MqttModule,
     DrawerControllersModule,
     DrawerCommandsModule,
+    DronesModule,
   ],
   controllers: [AppController],
   providers: [AppService],
