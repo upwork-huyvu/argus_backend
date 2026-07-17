@@ -188,9 +188,13 @@ export class DrawerCommandsService {
       }
     }
 
-    // Nothing to do — answer now instead of publishing a pointless command and
-    // making the caller wait out the expiry.
-    await this.assertNotAlreadyInTargetState(controllerId, dto.type);
+    // NOTE: we deliberately do NOT refuse a command because the stored state
+    // already matches it. That state is only what the device last reported, and
+    // a drawer can be opened or closed BY HAND — so "already OPEN" in the DB is
+    // not proof the caller's intent is pointless, and refusing would leave the
+    // user unable to command a drawer whose real position drifted from ours.
+    // The device is the authority: it no-ops safely (reports SUCCEEDED without
+    // touching the motor) when it is already in the target state.
 
     // Duplicate guard that works even with no client key: if the same command
     // type is already unresolved for this controller, hand back that one rather
@@ -302,56 +306,6 @@ export class DrawerCommandsService {
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
-
-  /** What the drawer/light must already read for a command to be a no-op. */
-  private static readonly TARGET_STATE: Record<
-    DrawerCommandType,
-    { column: "drawer_state" | "light_state"; value: string; label: string }
-  > = {
-    DRAWER_OPEN: { column: "drawer_state", value: "OPEN", label: "drawer is already OPEN" },
-    DRAWER_CLOSE: { column: "drawer_state", value: "CLOSED", label: "drawer is already CLOSED" },
-    LIGHT_ON: { column: "light_state", value: "ON", label: "light is already ON" },
-    LIGHT_OFF: { column: "light_state", value: "OFF", label: "light is already OFF" },
-  };
-
-  /**
-   * Reject a command the drawer has already satisfied, with a precise reason,
-   * rather than publishing it and letting the caller wait for an EXPIRED/TIMEOUT
-   * that explains nothing.
-   *
-   * Only enforced while the controller is online: its reported state is then
-   * current. If it is offline the stored state is a leftover from a previous
-   * boot and must not be used to refuse anything — a real drawer can be moved by
-   * hand while the ESP32 is unplugged.
-   */
-  private async assertNotAlreadyInTargetState(
-    controllerId: string,
-    type: DrawerCommandType,
-  ): Promise<void> {
-    if (!this.mqtt.isControllerOnline(controllerId)) return;
-
-    const target = DrawerCommandsService.TARGET_STATE[type];
-    const admin = this.supabase.getAdminClient();
-    const { data } = await admin
-      .from("drawer_state")
-      .select("drawer_state,light_state,reported_at")
-      .eq("drawer_controller_id", controllerId)
-      .maybeSingle<{
-        drawer_state: string | null;
-        light_state: string | null;
-        reported_at: string | null;
-      }>();
-    if (!data) return; // never reported — nothing to compare against
-
-    const current = data[target.column];
-    if (current === target.value) {
-      throw new ApiException(
-        409,
-        "ALREADY_IN_STATE",
-        `${type} rejected: ${target.label} (reported at ${data.reported_at ?? "unknown time"}).`,
-      );
-    }
-  }
 
   /** Not yet resolved: the device may still act on it. */
   private static readonly IN_FLIGHT_STATES = ["PENDING", "PUBLISHED", "ACCEPTED"];
