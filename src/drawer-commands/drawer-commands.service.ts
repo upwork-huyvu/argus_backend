@@ -1,4 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { SupabaseService } from "../common/supabase/supabase.service";
 import { ApiException } from "../common/errors/api-exception";
 import { ROLE_PERMISSIONS, type UserRole } from "../common/permissions";
@@ -55,10 +56,26 @@ export type CommandView = {
 export class DrawerCommandsService {
   private readonly logger = new Logger(DrawerCommandsService.name);
 
+  /**
+   * DRAWER_SKIP_ONLINE_CHECK=true → publish to MQTT without requiring known
+   * presence. Escape hatch for bring-up/debug: presence lives in this process's
+   * memory, so a backend that restarted (or never got the retained presence)
+   * would otherwise refuse commands for a perfectly healthy drawer.
+   * Cost: with no presence, a command to a truly absent device just EXPIREs.
+   */
+  private readonly skipOnlineCheck: boolean;
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly mqtt: MqttService,
-  ) {}
+    private readonly config: ConfigService,
+  ) {
+    this.skipOnlineCheck =
+      (this.config.get<string>("DRAWER_SKIP_ONLINE_CHECK") ?? "").trim().toLowerCase() === "true";
+    if (this.skipOnlineCheck) {
+      this.logger.warn("DRAWER_SKIP_ONLINE_CHECK=true — publishing commands without a presence check");
+    }
+  }
 
   /**
    * Create + publish a command. See docs/ESP32_DEVICE_MVP_PLAN.md §10.1.
@@ -110,44 +127,65 @@ export class DrawerCommandsService {
       throw new ApiException(409, "DRAWER_NOT_ACTIVE", "Controller is not active.");
     }
 
-    // Idempotency: return the existing command instead of creating a duplicate.
-    const existing = await this.findByIdempotencyKey(controllerId, idem);
-    if (existing) return this.toView(existing);
-
     const now = Date.now();
     const expiresInSeconds = dto.expiresInSeconds ?? DEFAULT_EXPIRES_SECONDS;
     const expiresAt = new Date(now + expiresInSeconds * 1000).toISOString();
 
-    const { data: inserted, error: insErr } = await admin
-      .from("drawer_commands")
-      .insert({
-        drawer_controller_id: controllerId,
-        ark_id: arkId,
-        requested_by: user.userId,
-        type: dto.type,
-        status: "PENDING",
-        idempotency_key: idem,
-        expires_at: expiresAt,
-      })
-      .select("*")
-      .maybeSingle<CommandRow>();
+    // Idempotency: replay the existing command instead of creating a duplicate.
+    // EXCEPT when it never reached the device — a command that was never
+    // published actuated nothing, so re-arming the same record under the same
+    // key is safe and keeps a transient failure (e.g. a brief CONTROLLER_OFFLINE)
+    // from poisoning that key forever.
+    const existing = await this.findByIdempotencyKey(controllerId, idem);
+    let inserted: CommandRow;
 
-    if (insErr) {
-      // Unique-violation race: another concurrent request created it first.
-      if (insErr.code === "23505") {
-        const raced = await this.findByIdempotencyKey(controllerId, idem);
-        if (raced) return this.toView(raced);
+    if (existing) {
+      if (!this.neverReachedDevice(existing)) return this.toView(existing);
+      const rearmed = await this.markCommand(existing.id, {
+        status: "PENDING",
+        error_code: null,
+        error_message: null,
+        completed_at: null,
+        expires_at: expiresAt,
+      });
+      if (!rearmed) throw new ApiException(500, "COMMAND_FAILED", "Unable to retry command.");
+      this.logger.log(`retrying command ${existing.id} (never published) under the same key`);
+      inserted = rearmed;
+    } else {
+      const { data: created, error: insErr } = await admin
+        .from("drawer_commands")
+        .insert({
+          drawer_controller_id: controllerId,
+          ark_id: arkId,
+          requested_by: user.userId,
+          type: dto.type,
+          status: "PENDING",
+          idempotency_key: idem,
+          expires_at: expiresAt,
+        })
+        .select("*")
+        .maybeSingle<CommandRow>();
+
+      if (insErr) {
+        // Unique-violation race: another concurrent request created it first.
+        if (insErr.code === "23505") {
+          const raced = await this.findByIdempotencyKey(controllerId, idem);
+          if (raced) return this.toView(raced);
+        }
+        throw new ApiException(500, "COMMAND_FAILED", insErr.message);
       }
-      throw new ApiException(500, "COMMAND_FAILED", insErr.message);
+      if (!created) throw new ApiException(500, "COMMAND_FAILED", "Unable to create command.");
+      inserted = created;
     }
-    if (!inserted) throw new ApiException(500, "COMMAND_FAILED", "Unable to create command.");
 
     // Fail fast if the controller is not online — do NOT rely on broker queueing.
-    if (!this.mqtt.isControllerOnline(controllerId)) {
+    // Skippable via DRAWER_SKIP_ONLINE_CHECK for bring-up/debug.
+    if (!this.skipOnlineCheck && !this.mqtt.isControllerOnline(controllerId)) {
       const updated = await this.markCommand(inserted.id, {
         status: "FAILED",
         error_code: "CONTROLLER_OFFLINE",
-        error_message: "Controller is offline.",
+        error_message:
+          "Controller is offline. Set DRAWER_SKIP_ONLINE_CHECK=true to publish anyway.",
         completed_at: new Date().toISOString(),
       });
       return this.toView(updated ?? inserted);
@@ -210,6 +248,18 @@ export class DrawerCommandsService {
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
+
+  /**
+   * True when this command definitively never got to the ESP32: it failed
+   * before any publish (published_at is null). Retrying it cannot double-actuate
+   * anything, so the Idempotency-Key may be reused. A command that WAS published
+   * is never retried — the device may have already run the motor.
+   */
+  private neverReachedDevice(row: CommandRow): boolean {
+    return (
+      row.published_at === null && (row.status === "FAILED" || row.status === "EXPIRED")
+    );
+  }
 
   private async findByIdempotencyKey(
     controllerId: string,
