@@ -9,7 +9,9 @@ import { connect, type MqttClient } from "mqtt";
 import { MqttMessageHandlerService } from "./mqtt-message-handler.service";
 import {
   commandTopic,
+  leafTopic,
   parseTopic,
+  RETAINED_LEAVES,
   SUBSCRIBED_LEAVES,
   subscriptionFilter,
 } from "./mqtt-topics";
@@ -153,6 +155,42 @@ export class MqttService implements OnModuleInit, OnModuleDestroy {
 
   get connected(): boolean {
     return this.client?.connected ?? false;
+  }
+
+  /**
+   * Wipe a controller's retained presence/state from the broker.
+   *
+   * Retained messages outlive the device AND the database row: deleting a
+   * controller without this leaves the broker serving a stale
+   * `{"drawerState":"OPEN"}` for that id forever, and every future subscriber
+   * (including a restarted backend) is handed that ghost on connect. Publishing
+   * a zero-length retained payload is the MQTT way to clear it.
+   *
+   * Best-effort: never blocks the delete if the broker is unreachable.
+   */
+  async clearRetained(controllerId: string): Promise<void> {
+    this.presence.delete(controllerId);
+    if (!this.client?.connected) {
+      this.logger.warn(`clearRetained(${controllerId}) skipped — MQTT not connected`);
+      return;
+    }
+    await Promise.all(
+      RETAINED_LEAVES.map(
+        (leaf) =>
+          new Promise<void>((resolve) => {
+            this.client!.publish(
+              leafTopic(controllerId, leaf),
+              "", // empty payload + retain = delete the retained message
+              { qos: 1, retain: true },
+              (err) => {
+                if (err) this.logger.warn(`clearRetained ${leaf} failed: ${err.message}`);
+                resolve();
+              },
+            );
+          }),
+      ),
+    );
+    this.logger.log(`cleared retained presence/state for ${controllerId}`);
   }
 
   /**

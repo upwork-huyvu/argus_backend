@@ -202,6 +202,41 @@ export class DrawerControllersService {
     return this.updateController(controllerId, { lifecycle_status: status });
   }
 
+  /**
+   * ADMIN. Delete a controller.
+   *
+   * Cascades: its drawer_commands / drawer_state / drawer_events rows go with it,
+   * and any drones docked in it are unassigned (drawer_controller_id -> NULL).
+   * The drones themselves survive.
+   *
+   * Also wipes the broker's retained presence/state for this id — otherwise the
+   * MQTT topics outlive the row and every future subscriber gets handed the
+   * ghost of a drawer that no longer exists. If the physical ESP32 is still
+   * running it will re-register on its next boot and get a NEW controllerId.
+   */
+  async remove(controllerId: string): Promise<{ id: string; deleted: true; dronesUnassigned: number }> {
+    const admin = this.supabase.getAdminClient();
+
+    // Count first — after the delete the FK has already nulled them out.
+    const { count } = await admin
+      .from("drones")
+      .select("id", { count: "exact", head: true })
+      .eq("drawer_controller_id", controllerId);
+
+    const { data, error } = await admin
+      .from("drawer_controllers")
+      .delete()
+      .eq("id", controllerId)
+      .select("id")
+      .maybeSingle<{ id: string }>();
+
+    if (error) throw new ApiException(500, "CONTROLLER_DELETE_FAILED", error.message);
+    if (!data) throw new ApiException(404, "CONTROLLER_NOT_FOUND", "Controller not found.");
+
+    await this.mqtt.clearRetained(controllerId);
+    return { id: data.id, deleted: true, dronesUnassigned: count ?? 0 };
+  }
+
   private async updateController(
     controllerId: string,
     patch: Record<string, unknown>,

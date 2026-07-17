@@ -26,6 +26,17 @@ export function presenceTopic(controllerId: string): string {
   return `${TOPIC_PREFIX}/${controllerId}/presence`;
 }
 
+export function stateTopic(controllerId: string): string {
+  return `${TOPIC_PREFIX}/${controllerId}/state`;
+}
+
+/** The leaves published with retain=true — the ones that outlive the device. */
+export const RETAINED_LEAVES = ["presence", "state"] as const;
+
+export function leafTopic(controllerId: string, leaf: string): string {
+  return `${TOPIC_PREFIX}/${controllerId}/${leaf}`;
+}
+
 /** Wildcard subscription for a given device-output leaf across all controllers. */
 export function subscriptionFilter(leaf: DeviceLeaf): string {
   return `${TOPIC_PREFIX}/+/${leaf}`;

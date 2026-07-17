@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Param, Patch, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  UseGuards,
+} from "@nestjs/common";
 import { ApiBearerAuth, ApiOkResponse, ApiTags } from "@nestjs/swagger";
 import { JwtAuthGuard } from "../common/auth/jwt-auth.guard";
 import { RolesGuard } from "../common/auth/roles.guard";
@@ -35,5 +45,17 @@ export class DrawerControllersController {
   @ApiOkResponse({ description: "Set lifecycle status (enable/disable)." })
   async setStatus(@Param("id") id: string, @Body() body: SetLifecycleStatusDto) {
     return this.controllers.setLifecycleStatus(id, body.lifecycleStatus);
+  }
+
+  /**
+   * Deletes the controller and its commands/state/events; drones docked in it
+   * are unassigned but kept. Also clears the broker's retained presence/state
+   * so the topics don't outlive the row.
+   */
+  @Delete(":id")
+  @HttpCode(200)
+  @ApiOkResponse({ description: "{ id, deleted: true, dronesUnassigned }" })
+  async remove(@Param("id", new ParseUUIDPipe()) id: string) {
+    return this.controllers.remove(id);
   }
 }
